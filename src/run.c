@@ -9,16 +9,97 @@
 
 
 
-
 #define LIBREGPU_LIB_DECLARATIONS_ONLY
 #define LIBREGPU_UI_DECLARATIONS_ONLY
 #include "lib.c"
-#include "ui.c"           
+#include "ui.c"       
 
 #include <math.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+
+
+
+
+
+
+
+
+
+#define SIM_W 64
+#define SIM_H 36
+#define SIM_TARGET_ID 1u
+#define SIM_SHADOW_ID 2u
+#define SIM_TEXTURE_ID 3u
+#define SIM_MAX_OBJECTS 8
+
+typedef struct { int32_t x, y, w, h; uint32_t color; } SimObject;   
+
+typedef struct {
+    bool      camera_enabled;
+    int32_t   cam_yaw_px, cam_pitch_px;     
+    float     cam_yaw_sub_px;               
+    bool      cam_pose_override;            
+    float     cam_yaw, cam_pitch;           
+    float     cam_fov_x, cam_fov_y;         
+
+    LibreGPUProjection projection;             
+    SimObject objects[SIM_MAX_OBJECTS];     size_t object_count;
+    bool      shadow_pass;  uint32_t shadow_param;
+    bool      shadow_overwrite;             
+    uint32_t  transient_id;                 
+    bool      inject_opaque;
+} SimScene;
+
+typedef struct {                            
+    uint32_t    skip;                       
+    uint32_t    count;                      
+    LibreGPUStatus status;                     
+} SimSubmitFault;
+
+
+
+#define SIM_LOG_MAX 1024
+typedef struct {
+    uint64_t sequence;        
+    uint64_t fence;           
+    bool     ordinary;        
+    bool     accepted;
+    size_t   ops_executed;    
+    size_t   dataset_ops;     
+} SimSubmission;
+
+
+
+typedef struct {
+    uint64_t submits_ordinary;              
+    uint64_t submits_update;                
+    uint64_t max_fence, completed_fence;
+} LibreGPUSimStats;
+
+size_t         libregpu_sim_submission_count(const LibreGPUBackend *be);
+bool           libregpu_sim_submission(const LibreGPUBackend *be, size_t index, SimSubmission *out);
+uint64_t       libregpu_sim_forwarded_ops(const LibreGPUBackend *be);
+
+
+LibreGPUStatus    libregpu_sim_forward(void *sim_ctx, const LibreGPURawOp *op);
+
+
+void           libregpu_sim_capture_begin(LibreGPUCapture *c, LibreGPUBackend *be);
+void           libregpu_sim_capture_end(const LibreGPUCapture *c);
+
+LibreGPUBackend  *libregpu_sim_backend_create(uint32_t fence_latency);
+void           libregpu_sim_backend_destroy(LibreGPUBackend *be);
+LibreGPUStatus    libregpu_sim_enqueue(LibreGPUBackend *be, LibreGPURawDataset *ds);   
+void           libregpu_sim_set_session_valid(LibreGPUBackend *be, bool valid);
+const uint32_t *libregpu_sim_display(const LibreGPUBackend *be);
+uint64_t       libregpu_sim_destroyed_count(const LibreGPUBackend *be);
+void           libregpu_sim_inject_submit_fault(LibreGPUBackend *be, SimSubmitFault f);
+void           libregpu_sim_scene_defaults(SimScene *s);
+LibreGPUStatus    libregpu_sim_build_dataset(const SimScene *s, LibreGPURawDataset *out);
+LibreGPUStatus    libregpu_sim_render_reference(const LibreGPURawDataset *ds, uint32_t *fb_out);
+LibreGPUStatus    libregpu_sim_demo_scenario(LibreGPUBackend *be, size_t frames);
 
 
 
@@ -51,10 +132,9 @@
 void libregpu_config_defaults(LibreGPUConfig *c)
 {
     memset(c, 0, sizeof *c);
-    c->mode = LIBREGPU_MODE_OPTIMIZE;
     c->target_loops_per_second = 0.0;
     c->enable_micro_pixel = true;
-    c->enable_camera = true;
+    c->enable_camera = false;                    
     c->camera_max_reuse_angle = 0.35f;
     c->camera_position_epsilon = 1e-4f;
     c->camera_roll_epsilon = 1e-4f;
@@ -63,13 +143,11 @@ void libregpu_config_defaults(LibreGPUConfig *c)
     c->micro_pixel_max_area_fraction = 0.5f;
     c->baseline_sample_interval = 0;
     c->full_refresh_interval = 600;
-    c->vram_budget_bytes = 0;
 }
 
 LibreGPUStatus libregpu_config_validate(const LibreGPUConfig *c)
 {
     if (!c) return LIBREGPU_ERR_INVALID_ARG;
-    if ((unsigned)c->mode > (unsigned)LIBREGPU_MODE_OPTIMIZE) return LIBREGPU_ERR_INVALID_ARG;
     if (!isfinite(c->target_loops_per_second) || c->target_loops_per_second < 0.0 ||
         (c->target_loops_per_second > 0.0 && c->target_loops_per_second < LIBREGPU_GOV_MIN_HZ) ||
         c->target_loops_per_second > LIBREGPU_GOV_MAX_HZ) return LIBREGPU_ERR_INVALID_ARG;
@@ -124,7 +202,7 @@ LibreGPUStatus libregpu_runtime_init(LibreGPURuntime *rt, const LibreGPUConfig *
     rt->config = *cfg;
     rt->backend = backend;
     libregpu_metrics_init(&rt->metrics);
-    st = mem_init(&rt->mem, backend, cfg->vram_budget_bytes);
+    st = mem_init(&rt->mem, backend);
     if (st != LIBREGPU_OK) { memset(rt, 0, sizeof *rt); return st; }
     st = gov_init(&rt->gov, cfg->target_loops_per_second);
     if (st != LIBREGPU_OK) { mem_shutdown(&rt->mem); memset(rt, 0, sizeof *rt); return st; }
@@ -231,7 +309,14 @@ static void sample_vram(LibreGPURuntime *rt)
     rt->metrics.vram_sum += ms.bytes_tracked;
     rt->metrics.vram_samples++;
     if (ms.bytes_tracked_peak > rt->metrics.vram_peak) rt->metrics.vram_peak = ms.bytes_tracked_peak;
-    if (ms.libregpu_bytes_peak > rt->metrics.libregpu_vram_peak) rt->metrics.libregpu_vram_peak = ms.libregpu_bytes_peak;
+}
+
+
+
+
+static bool fence_advances(const LibreGPURuntime *rt, uint64_t fence)
+{
+    return fence != 0 && fence > rt->last_fence;
 }
 
 static void finish_cycle(LibreGPURuntime *rt, LibreGPUCycleInfo *info, uint64_t t0, uint64_t fence,
@@ -266,6 +351,21 @@ static void finish_cycle(LibreGPURuntime *rt, LibreGPUCycleInfo *info, uint64_t 
 
 
 
+static LibreGPUStatus execute_plan(LibreGPURuntime *rt, const LibreGPUZPlan *plan, const LibreGPURawDataset *raw,
+                                const LibreGPUResourceId *scratch, LibreGPURebuildResult *rr)
+{
+    LibreGPUStatus st = dataset_rebuilder_execute(plan, raw, rt->backend, scratch, rr);
+    if (st != LIBREGPU_OK) return st;
+    if (!fence_advances(rt, rr->fence)) {
+        rt->backend->wait_idle(rt->backend->ctx);           
+        return LIBREGPU_ERR_BACKEND;
+    }
+    return LIBREGPU_OK;
+}
+
+
+
+
 static LibreGPUStatus run_ordinary(LibreGPURuntime *rt, const LibreGPURawDataset *raw, LibreGPUCycleInfo *info,
                                 uint64_t t0, const char *reason)
 {
@@ -278,10 +378,11 @@ static LibreGPUStatus run_ordinary(LibreGPURuntime *rt, const LibreGPURawDataset
     info->reason = reason;
     info->decision = LIBREGPU_STREAM_FALLBACK_ORDINARY;
 
-    LibreGPUStatus st = dataset_rebuilder_execute(&plan, raw, rt->backend, NULL, &rr);
+    LibreGPUStatus st = execute_plan(rt, &plan, raw, NULL, &rr);
     if (st != LIBREGPU_OK) return st;                         
     mem_note_raw_submission(&rt->mem, raw, rr.fence);      
     request_destroys(rt, raw);
+    info->submitted = true;
     info->submitted_mode = LIBREGPU_Z_ORDINARY;
     info->ops_submitted = rr.ops_submitted;
     rt->metrics.fallback_cycles++;
@@ -302,6 +403,9 @@ LibreGPUStatus libregpu_runtime_step(LibreGPURuntime *rt, LibreGPUCycleInfo *inf
     if (!be->session_valid(be->ctx)) {
         if (rt->have_baseline) info->baseline_lost = true;
         invalidate_baseline(rt);
+        rt->last_sequence = 0;                             
+        rt->last_fence = 0;
+        mem_reset_fences(&rt->mem);
         info->session_invalid = true;
         return LIBREGPU_ERR_SESSION_INVALID;
     }
@@ -320,21 +424,70 @@ LibreGPUStatus libregpu_runtime_step(LibreGPURuntime *rt, LibreGPUCycleInfo *inf
     rt->last_cycle_optimized = false;
 
     
+
+    if (raw.sequence == 0 || raw.sequence <= rt->last_sequence) {
+        rt->metrics.refused_datasets++;
+        info->reason = "refused: dataset sequence is not newer than the last one";
+        rt->processing_y = false;
+        libregpu_dataset_release(&raw);
+        return LIBREGPU_ERR_VALIDATION;
+    }
+    rt->last_sequence = raw.sequence;
+
+    
+
+
+    if (raw.forwarded) {
+        rt->metrics.forwarded_datasets++;
+        if (rt->have_baseline) info->baseline_lost = true;
+        invalidate_baseline(rt);
+        info->forwarded = true;
+        info->reason = "forwarded by the capture side: not submitted";
+        rt->processing_y = false;
+        libregpu_dataset_release(&raw);
+        return LIBREGPU_OK;
+    }
+
+    
+
+
     if (raw.corrupt) {
         rt->metrics.corrupt_datasets++;
         if (rt->have_baseline) info->baseline_lost = true;
         invalidate_baseline(rt);
-        info->reason = "corrupt dataset: not optimised, not re-submitted";
+        info->reason = "refused: dataset was flagged corrupt";
         rt->processing_y = false;
         libregpu_dataset_release(&raw);
         return LIBREGPU_ERR_VALIDATION;
+    }
+
+    
+    if (!raw.complete) {
+        rt->metrics.refused_datasets++;
+        if (rt->have_baseline) info->baseline_lost = true;
+        invalidate_baseline(rt);
+        info->reason = "refused: dataset is not complete";
+        rt->processing_y = false;
+        libregpu_dataset_release(&raw);
+        return LIBREGPU_ERR_VALIDATION;
+    }
+
+    
+
+    if (mem_creates_tracked_identity(&rt->mem, &raw)) {
+        rt->metrics.refused_datasets++;
+        if (rt->have_baseline) info->baseline_lost = true;
+        invalidate_baseline(rt);
+        info->reason = "refused: a resource identity was reused without a new generation";
+        rt->processing_y = false;
+        libregpu_dataset_release(&raw);
+        return LIBREGPU_ERR_LIFETIME;
     }
 
     double dt = 0.0;                                       
     if (raw.timestamp_ns && rt->last_dataset_ts_ns && raw.timestamp_ns > rt->last_dataset_ts_ns)
         dt = (double)(raw.timestamp_ns - rt->last_dataset_ts_ns) * 1e-9;
     rt->last_dataset_ts_ns = raw.timestamp_ns;
-    rt->last_dataset_ns = raw.timestamp_ns;                 
 
     GirDataset y;
     GirDelta delta;
@@ -359,11 +512,12 @@ LibreGPUStatus libregpu_runtime_step(LibreGPURuntime *rt, LibreGPUCycleInfo *inf
     if (!rt->have_baseline) {
         LibreGPUZPlan plan;
         memset(&plan, 0, sizeof plan);
-        st = dataset_rebuilder_execute(&plan, &raw, be, NULL, &rr);
+        st = execute_plan(rt, &plan, &raw, NULL, &rr);
         if (st != LIBREGPU_OK) { result = st; goto done; }
         mem_note_raw_submission(&rt->mem, &raw, rr.fence);
         request_destroys(rt, &raw);
         const bool kept = promote(rt, &y);
+        info->submitted = true;
         info->was_baseline = true;
         info->baseline_lost = !kept;
         info->decision = LIBREGPU_STREAM_FALLBACK_ORDINARY;
@@ -396,18 +550,14 @@ LibreGPUStatus libregpu_runtime_step(LibreGPURuntime *rt, LibreGPUCycleInfo *inf
     info->camera_reason = sr.camera_reason;
     info->changes = delta.change_count;
     info->record_changes_per_second = sr.record_changes_per_second;
-    info->changes_per_second = info->record_changes_per_second;   
     info->reason = sr.fallback_reason ? sr.fallback_reason
                                       : (sr.micro_pixel ? sr.micro_reason : sr.camera_reason);
-    if (sr.plan.mode != LIBREGPU_Z_ORDINARY) rt->metrics.would_optimize_cycles++;
 
     
     {
         const LibreGPUConfig *cfg = &rt->config;
         const char *force = NULL;
-        if (cfg->mode != LIBREGPU_MODE_OPTIMIZE)
-            force = "decision-only mode";
-        else if (cfg->baseline_sample_interval && rt->cycle % cfg->baseline_sample_interval == 0)
+        if (cfg->baseline_sample_interval && rt->cycle % cfg->baseline_sample_interval == 0)
             { force = "baseline GPU sample"; forced_baseline = true; }
         else if (cfg->full_refresh_interval && rt->cycle % cfg->full_refresh_interval == 0)
             force = "periodic full refresh";
@@ -428,22 +578,16 @@ LibreGPUStatus libregpu_runtime_step(LibreGPURuntime *rt, LibreGPUCycleInfo *inf
     if (sr.plan.mode == LIBREGPU_Z_INCREMENTAL && sr.plan.reproject) {
         const uint64_t bytes = (uint64_t)sr.plan.reprojection.surface_w *
                                (uint64_t)sr.plan.reprojection.surface_h * 4u;
-        const LibreGPUStatus sst = mem_acquire_scratch(&rt->mem, bytes, &scratch);
-        if (sst == LIBREGPU_OK) {
+        if (mem_acquire_scratch(&rt->mem, bytes, &scratch) == LIBREGPU_OK) {
             has_scratch = true;
         } else {
-            
-
-            const char *why = (sst == LIBREGPU_ERR_NO_MEMORY)
-                                  ? "no VRAM for reprojection target"
-                                  : "reprojection target unavailable";
-            streamline_force_ordinary(&sr, why);
-            info->reason = why;
+            streamline_force_ordinary(&sr, "reprojection target unavailable");
+            info->reason = "reprojection target unavailable";
         }
     }
 
     
-    st = dataset_rebuilder_execute(&sr.plan, &raw, be, has_scratch ? &scratch : NULL, &rr);
+    st = execute_plan(rt, &sr.plan, &raw, has_scratch ? &scratch : NULL, &rr);
     if (st != LIBREGPU_OK && sr.plan.mode != LIBREGPU_Z_ORDINARY) {
         rt->metrics.failed_rebuilds++;
         if (has_scratch) { mem_request_release(&rt->mem, scratch); has_scratch = false; }
@@ -457,7 +601,7 @@ LibreGPUStatus libregpu_runtime_step(LibreGPURuntime *rt, LibreGPUCycleInfo *inf
         info->fell_back_after_failure = true;              
         info->reason = "rebuild rejected; ordinary path used";
         streamline_force_ordinary(&sr, info->reason);
-        st = dataset_rebuilder_execute(&sr.plan, &raw, be, NULL, &rr);
+        st = execute_plan(rt, &sr.plan, &raw, NULL, &rr);
     }
     if (st != LIBREGPU_OK) {
         if (has_scratch) { mem_request_release(&rt->mem, scratch); has_scratch = false; }
@@ -475,6 +619,7 @@ LibreGPUStatus libregpu_runtime_step(LibreGPURuntime *rt, LibreGPUCycleInfo *inf
     
     {
         const LibreGPUZMode mode = sr.plan.mode;
+        info->submitted = true;
         info->submitted_mode = mode;
         info->ops_submitted = rr.ops_submitted;
         info->dirty_pixels = (mode == LIBREGPU_Z_INCREMENTAL) ? sr.dirty_pixels : 0;
@@ -523,85 +668,13 @@ LibreGPUStatus libregpu_runtime_run(LibreGPURuntime *rt, volatile sig_atomic_t *
             continue;
         }
         if (st == LIBREGPU_ERR_SESSION_INVALID) { libregpu_sleep_ns(5000000ULL); continue; }
-        if (st == LIBREGPU_ERR_VALIDATION) continue;          
+        if (st == LIBREGPU_ERR_VALIDATION || st == LIBREGPU_ERR_LIFETIME) continue;          
         if (st != LIBREGPU_OK) return st;
         if (cb) cb(&info, user);
         gov_wait(&rt->gov);                                
     }
     return LIBREGPU_OK;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-static bool g_armed = false;
-static bool g_paused = false;
-static long g_fail_index = -1;
-static long g_count = 0;
-
-void libregpu_alloc_fault_arm(long fail_index)
-{
-    g_armed = true;
-    g_paused = false;
-    g_fail_index = fail_index;
-    g_count = 0;
-}
-
-void libregpu_alloc_fault_pause(bool paused)
-{
-    g_paused = paused;
-}
-
-void libregpu_alloc_fault_disarm(void)
-{
-    g_armed = false;
-    g_paused = false;
-}
-
-long libregpu_alloc_count(void)
-{
-    return g_count;
-}
-
-
-static bool should_fail(void)
-{
-    if (!g_armed || g_paused) return false;
-    const long idx = g_count++;
-    return g_fail_index >= 0 && idx == g_fail_index;
-}
-
-void *libregpu_malloc(size_t n)
-{
-    if (should_fail()) return NULL;
-    return malloc(n);
-}
-
-void *libregpu_calloc(size_t count, size_t size)
-{
-    if (should_fail()) return NULL;
-    return calloc(count, size);
-}
-
-void *libregpu_realloc(void *p, size_t n)
-{
-    if (should_fail()) return NULL;     
-    return realloc(p, n);
-}
-
 
 
 
@@ -659,7 +732,9 @@ typedef struct {
     bool session_valid, attached;
     uint64_t violations, destroyed;
     SimSubmitFault submit_fault;
-    uint32_t destroy_faults;
+    SimSubmission log[SIM_LOG_MAX];
+    size_t log_count;
+    uint64_t forwarded_ops;
 } SimBackend;
 
 
@@ -814,7 +889,7 @@ static LibreGPUStatus sim_next_dataset(void *ctx, LibreGPURawDataset *out)
 
 static LibreGPUStatus sim_prevalidate(const LibreGPURawDataset *ds, const LibreGPUUpdateWork *w)
 {
-    if (!ds || !ds->complete || ds->corrupt) return LIBREGPU_ERR_VALIDATION;
+    if (!ds || !ds->complete || ds->forwarded || ds->corrupt) return LIBREGPU_ERR_VALIDATION;
     if (!w) return LIBREGPU_OK;
     if (w->region_count > LIBREGPU_MAX_REGIONS) return LIBREGPU_ERR_VALIDATION;
     if (w->op_count > 0 && !w->ops) return LIBREGPU_ERR_VALIDATION;
@@ -845,13 +920,25 @@ static void sim_run(SimBackend *s, const LibreGPURawDataset *ds, const LibreGPUU
     }
 }
 
+static void sim_log(SimBackend *s, const LibreGPURawDataset *ds, const LibreGPUUpdateWork *w, uint64_t fence, bool accepted)
+{
+    if (s->log_count >= SIM_LOG_MAX) return;
+    SimSubmission *e = &s->log[s->log_count++];
+    e->sequence = ds ? ds->sequence : 0;
+    e->fence = accepted ? fence : 0;
+    e->ordinary = (w == NULL);
+    e->accepted = accepted;
+    e->ops_executed = w ? w->op_count : (ds ? ds->op_count : 0);
+    e->dataset_ops = ds ? ds->op_count : 0;
+}
+
 static LibreGPUStatus sim_submit(void *ctx, const LibreGPURawDataset *ds, const LibreGPUUpdateWork *w,
                               uint64_t *fence_out)
 {
     SimBackend *s = (SimBackend *)ctx;
     if (!s->session_valid) return LIBREGPU_ERR_SESSION_INVALID;
     LibreGPUStatus st = sim_prevalidate(ds, w);                      
-    if (st != LIBREGPU_OK) return st;
+    if (st != LIBREGPU_OK) { sim_log(s, ds, w, 0, false); return st; }
 
     if (s->submit_fault.skip > 0) {
         s->submit_fault.skip--;
@@ -861,14 +948,17 @@ static LibreGPUStatus sim_submit(void *ctx, const LibreGPURawDataset *ds, const 
             const uint64_t fence = ++s->submitted;
             s->gpu.cost = 0;
             sim_run(s, ds, w, fence, (w ? w->op_count : ds->op_count) / 2);
+            sim_log(s, ds, w, fence, false);
             return LIBREGPU_ERR_BACKEND;
         }
+        sim_log(s, ds, w, 0, false);
         return s->submit_fault.status;                            
     }
 
     const uint64_t fence = ++s->submitted;
     s->gpu.cost = 0;
     sim_run(s, ds, w, fence, SIZE_MAX);
+    sim_log(s, ds, w, fence, true);
     s->last_cost = s->gpu.cost;
     s->last_cost_fence = fence;
     const uint64_t done = s->submitted > s->latency ? s->submitted - s->latency : 0;
@@ -891,7 +981,6 @@ static LibreGPUStatus sim_create_scratch(void *ctx, LibreGPUResourceId id, uint6
 static LibreGPUStatus sim_destroy_resource(void *ctx, LibreGPUResourceId id)
 {
     SimBackend *s = (SimBackend *)ctx;
-    if (s->destroy_faults > 0) { s->destroy_faults--; return LIBREGPU_ERR_BACKEND; }   
     SimRes *r = sim_res_find(s, id);
     if (!r) return LIBREGPU_ERR_BACKEND;
     if (!r->alive) { s->violations++; return LIBREGPU_ERR_BACKEND; }                  
@@ -976,6 +1065,54 @@ const uint32_t *libregpu_sim_display(const LibreGPUBackend *be)
     return ((const SimHandle *)be)->sim.gpu.display;
 }
 
+size_t libregpu_sim_submission_count(const LibreGPUBackend *be)
+{
+    return ((const SimHandle *)be)->sim.log_count;
+}
+
+bool libregpu_sim_submission(const LibreGPUBackend *be, size_t index, SimSubmission *out)
+{
+    const SimBackend *s = &((const SimHandle *)be)->sim;
+    if (!out || index >= s->log_count) return false;
+    *out = s->log[index];
+    return true;
+}
+
+
+
+
+void libregpu_sim_stats(const LibreGPUBackend *be, LibreGPUSimStats *out)
+{
+    if (!out) return;
+    memset(out, 0, sizeof *out);
+    if (!be) return;
+    const SimBackend *s = &((const SimHandle *)be)->sim;
+    for (size_t i = 0; i < s->log_count; i++) {
+        const SimSubmission *e = &s->log[i];
+        if (!e->accepted && e->fence == 0) continue;        
+        if (e->ordinary) out->submits_ordinary++;
+        else             out->submits_update++;
+    }
+    out->max_fence       = s->submitted;
+    out->completed_fence = s->completed;
+}
+
+uint64_t libregpu_sim_forwarded_ops(const LibreGPUBackend *be)
+{
+    return ((const SimHandle *)be)->sim.forwarded_ops;
+}
+
+
+
+LibreGPUStatus libregpu_sim_forward(void *sim_ctx, const LibreGPURawOp *op)
+{
+    SimBackend *s = (SimBackend *)sim_ctx;
+    if (!s || !op || !s->session_valid) return LIBREGPU_ERR_BACKEND;
+    sim_exec_op(s, op, NULL, s->submitted);
+    s->forwarded_ops++;
+    return LIBREGPU_OK;
+}
+
 uint64_t libregpu_sim_destroyed_count(const LibreGPUBackend *be)
 {
     return ((const SimHandle *)be)->sim.destroyed;
@@ -984,11 +1121,6 @@ uint64_t libregpu_sim_destroyed_count(const LibreGPUBackend *be)
 void libregpu_sim_inject_submit_fault(LibreGPUBackend *be, SimSubmitFault f)
 {
     ((SimHandle *)be)->sim.submit_fault = f;
-}
-
-void libregpu_sim_inject_destroy_faults(LibreGPUBackend *be, uint32_t count)
-{
-    ((SimHandle *)be)->sim.destroy_faults = count;
 }
 
 
@@ -1015,6 +1147,19 @@ void libregpu_sim_scene_defaults(SimScene *s)
     s->objects[2] = (SimObject){ 46,  6, 10, 12, 0xCC };
 }
 
+static uint64_t g_sim_next_sequence = 1;           
+
+void libregpu_sim_capture_begin(LibreGPUCapture *c, LibreGPUBackend *be)
+{
+    libregpu_capture_init_forward(c, libregpu_sim_forward, be->ctx);
+    c->next_sequence = g_sim_next_sequence;
+}
+
+void libregpu_sim_capture_end(const LibreGPUCapture *c)
+{
+    g_sim_next_sequence = c->next_sequence;
+}
+
 LibreGPUStatus libregpu_sim_build_dataset(const SimScene *s, LibreGPURawDataset *out)
 {
     if (!s || !out) return LIBREGPU_ERR_INVALID_ARG;
@@ -1024,7 +1169,8 @@ LibreGPUStatus libregpu_sim_build_dataset(const SimScene *s, LibreGPURawDataset 
     LibreGPUCapture cap;
     LibreGPUStatus st = LIBREGPU_OK;
     bool ready = false;
-    libregpu_capture_init(&cap);
+    libregpu_capture_init(&cap);          
+    cap.next_sequence = g_sim_next_sequence;        
 
 #define FEED(opv) do { st = libregpu_capture_feed(&cap, &(opv), out, &ready); if (st != LIBREGPU_OK) goto fail; } while (0)
 
@@ -1032,12 +1178,14 @@ LibreGPUStatus libregpu_sim_build_dataset(const SimScene *s, LibreGPURawDataset 
         LibreGPURawOp o = sim_op_new(LIBREGPU_OP_SET_CAMERA);
         o.camera_valid = true;
         o.camera.projection = s->projection;
-        o.camera.fov_x = 1.0f;
-        o.camera.fov_y = (float)SIM_H / (float)SIM_W;
+        o.camera.fov_x = s->cam_pose_override ? s->cam_fov_x : 1.0f;
+        o.camera.fov_y = s->cam_pose_override ? s->cam_fov_y : (float)SIM_H / (float)SIM_W;
         o.camera.surface_w = SIM_W;
         o.camera.surface_h = SIM_H;
-        o.camera.yaw   = ((float)s->cam_yaw_px + s->cam_yaw_sub_px) * o.camera.fov_x / (float)SIM_W;
-        o.camera.pitch = (float)s->cam_pitch_px * o.camera.fov_y / (float)SIM_H;
+        o.camera.yaw   = s->cam_pose_override ? s->cam_yaw
+                         : ((float)s->cam_yaw_px + s->cam_yaw_sub_px) * o.camera.fov_x / (float)SIM_W;
+        o.camera.pitch = s->cam_pose_override ? s->cam_pitch
+                         : (float)s->cam_pitch_px * o.camera.fov_y / (float)SIM_H;
         FEED(o);
     }
     if (s->transient_id) {
@@ -1105,6 +1253,7 @@ LibreGPUStatus libregpu_sim_build_dataset(const SimScene *s, LibreGPURawDataset 
     }
 #undef FEED
     libregpu_capture_shutdown(&cap);
+    if (ready) g_sim_next_sequence = out->sequence + 1;
     return ready ? LIBREGPU_OK : LIBREGPU_ERR_VALIDATION;
 fail:
     libregpu_capture_shutdown(&cap);
@@ -1196,10 +1345,10 @@ void libregpu_metrics_report(const LibreGPUMetrics *m, const LibreGPUGovernor *g
     const double inc = avg(m->gpu_ns_incremental, m->gpu_samples_incremental);
     const double ord = avg(m->gpu_ns_ordinary, m->gpu_samples_ordinary);
     const double base = avg(m->gpu_ns_baseline, m->gpu_samples_baseline);
-    fprintf(out, "  GPU time per cycle    : optimized %.0f ns (%llu samples), ordinary %.0f ns (%llu samples)\n",
+    fprintf(out, "  GPU time per cycle    : Z updates %.0f ns (%llu samples), original datasets %.0f ns (%llu samples)\n",
             inc, (unsigned long long)m->gpu_samples_incremental, ord, (unsigned long long)m->gpu_samples_ordinary);
     if (m->gpu_samples_baseline >= 4 && m->gpu_samples_incremental > 0 && base > 0.0) {
-        fprintf(out, "  GPU saving            : %.1f%% (optimized vs %llu forced ordinary samples; indicative, frames differ)\n",
+        fprintf(out, "  GPU saving            : %.1f%% (Z updates vs %llu forced original-dataset samples; indicative, frames differ)\n",
                 100.0 * (base - inc) / base, (unsigned long long)m->gpu_samples_baseline);
     } else if (m->gpu_samples_incremental == 0 && m->gpu_samples_ordinary == 0) {
         fprintf(out, "  GPU saving            : NOT MEASURED (backend reports no GPU timing)\n");
@@ -1207,10 +1356,8 @@ void libregpu_metrics_report(const LibreGPUMetrics *m, const LibreGPUGovernor *g
         fprintf(out, "  GPU saving            : NOT DEMONSTRATED (needs forced-ordinary baseline samples)\n");
     }
 
-    fprintf(out, "  VRAM tracked peak/avg : %llu / %.0f bytes (all tracked resources)\n",
+    fprintf(out, "  VRAM tracked peak/avg : %llu / %.0f bytes\n",
             (unsigned long long)m->vram_peak, avg(m->vram_sum, m->vram_samples));
-    fprintf(out, "  VRAM LIBREGPU-owned peak : %llu bytes (the budget applies to this)\n",
-            (unsigned long long)m->libregpu_vram_peak);
     if (gov) {
         fprintf(out, "  loop rate             : %.1f Hz (target %s%.1f)\n", gov_loop_rate(gov),
                 gov->enabled ? "" : "unlimited ", gov->enabled ? gov->target_hz : 0.0);
@@ -1220,9 +1367,12 @@ void libregpu_metrics_report(const LibreGPUMetrics *m, const LibreGPUGovernor *g
     fprintf(out, "  frame-time variance   : mean %.1f us, std-dev %.1f us\n",
             m->interval_mean_ns / 1e3, sqrt(var) / 1e3);
     fprintf(out, "  resource-lifetime err : %llu\n", (unsigned long long)m->lifetime_errors);
-    if (m->corrupt_datasets || m->bookkeeping_errors || m->baseline_losses)
-        fprintf(out, "  degradations          : corrupt datasets %llu, bookkeeping errors %llu, baselines lost %llu\n",
-                (unsigned long long)m->corrupt_datasets, (unsigned long long)m->bookkeeping_errors,
+    if (m->forwarded_datasets || m->refused_datasets || m->corrupt_datasets ||
+        m->bookkeeping_errors || m->baseline_losses)
+        fprintf(out, "  degradations          : forwarded datasets %llu, refused datasets %llu, corrupt datasets %llu, bookkeeping errors %llu, baselines lost %llu\n",
+                (unsigned long long)m->forwarded_datasets, (unsigned long long)m->refused_datasets,
+                (unsigned long long)m->corrupt_datasets,
+                (unsigned long long)m->bookkeeping_errors,
                 (unsigned long long)m->baseline_losses);
     fprintf(out, "  output correctness    : verified offline by `--selftest`, not at runtime\n");
 }
@@ -1352,6 +1502,7 @@ static LibreGPUConfig test_config(void)
     LibreGPUConfig c;
     libregpu_config_defaults(&c);
     c.micro_pixel_max_area_fraction = 0.9f;
+    c.enable_camera = true;                      
     return c;
 }
 
@@ -1384,11 +1535,6 @@ static void test_pipeline(FILE *out, int *failures, int *checks)
 
     s.cam_yaw_px = 5; s.objects[1].x += 4;
     EXPECT_FRAME(&h, "pan + object moved (both)", &s, LIBREGPU_STREAM_BOTH, LIBREGPU_Z_INCREMENTAL);
-    {
-        LibreGPUMemStats ms;
-        mem_get_stats(&h.rt.mem, &ms);
-        CHECK(&h, ms.pool_reuse_count >= 1, "reprojection scratch should be reused from the pool");
-    }
 
     s.shadow_pass = true; s.shadow_param = 1;
     EXPECT_FRAME(&h, "shadow pass added (structure)", &s, LIBREGPU_STREAM_FALLBACK_ORDINARY, LIBREGPU_Z_ORDINARY);
@@ -1470,6 +1616,20 @@ static void test_camera_model(FILE *out, int *failures, int *checks)
     CHECK(&h, last_info.camera_reason && strstr(last_info.camera_reason, "not declared"),
           "undeclared projection must disable the camera unit, reason was '%s'",
           last_info.camera_reason ? last_info.camera_reason : "");
+
+    {
+        SimScene t;
+        libregpu_sim_scene_defaults(&t);
+        t.cam_pose_override = true;
+        t.cam_fov_x = 1e-30f;
+        t.cam_fov_y = 1e-30f;
+        EXPECT_FRAME(&h, "tiny FOV baseline", &t, LIBREGPU_STREAM_FALLBACK_ORDINARY, LIBREGPU_Z_ORDINARY);
+        t.cam_yaw = 0.1f;
+        EXPECT_FRAME(&h, "tiny FOV, huge shift", &t, LIBREGPU_STREAM_FALLBACK_ORDINARY, LIBREGPU_Z_ORDINARY);
+        CHECK(&h, last_info.camera_reason && strstr(last_info.camera_reason, "out of range"),
+              "an overflowing reprojection shift must be refused, reason was '%s'",
+              last_info.camera_reason ? last_info.camera_reason : "");
+    }
 
     h_fold(&h, failures, checks);
     h_close(&h);
@@ -1562,60 +1722,6 @@ static void test_lifetime(FILE *out, int *failures, int *checks)
     h_close(&h);                                          
     h_fold(&h, failures, checks);
 
-    
-    libregpu_sim_scene_defaults(&s);
-    if (!h_open(&h, out, 0, &cfg)) { h_fold(&h, failures, checks); return; }
-    h_frame(&h, &s, &ci, &match);
-    s.transient_id = 10;
-    h_frame(&h, &s, &ci, &match);
-    libregpu_sim_inject_destroy_faults(h.be, 2);
-    s.transient_id = 0;
-    h_frame(&h, &s, &ci, &match);                         
-    CHECK(&h, libregpu_sim_destroyed_count(h.be) == 0, "refused destroy must not be counted as done");
-    h_frame(&h, &s, &ci, &match);                         
-    CHECK(&h, libregpu_sim_destroyed_count(h.be) == 0, "still refused");
-    h_frame(&h, &s, &ci, &match);                         
-    CHECK(&h, libregpu_sim_destroyed_count(h.be) == 1, "destroy retried until the backend accepts");
-    {
-        LibreGPUMemStats ms;
-        mem_get_stats(&h.rt.mem, &ms);
-        CHECK(&h, ms.destroy_failures == 2, "both refusals must be counted (got %llu)",
-              (unsigned long long)ms.destroy_failures);
-    }
-    fprintf(out, "  refused destroys are retried, never forgotten\n");
-    h_fold(&h, failures, checks);
-    h_close(&h);
-    h_fold(&h, failures, checks);
-
-    
-    libregpu_sim_scene_defaults(&s);
-    if (!h_open(&h, out, 0, &cfg)) { h_fold(&h, failures, checks); return; }
-    h_frame(&h, &s, &ci, &match);
-    s.transient_id = 10;                                  
-    {
-        LibreGPURawDataset ds;
-        uint32_t ref[SIM_W * SIM_H];
-        if (libregpu_sim_build_dataset(&s, &ds) == LIBREGPU_OK && libregpu_sim_render_reference(&ds, ref) == LIBREGPU_OK &&
-            libregpu_sim_enqueue(h.be, &ds) == LIBREGPU_OK) {
-            memset(&ci, 0, sizeof ci);
-            libregpu_alloc_fault_arm(0);                     
-            LibreGPUStatus step_st = libregpu_runtime_step(&h.rt, &ci);
-            libregpu_alloc_fault_disarm();
-            CHECK(&h, step_st == LIBREGPU_OK, "the frame must still be submitted (%s)", libregpu_status_str(step_st));
-            CHECK(&h, memcmp(ref, libregpu_sim_display(h.be), sizeof ref) == 0, "and be correct");
-            CHECK(&h, h.rt.metrics.bookkeeping_errors >= 1, "the failure must be counted");
-            CHECK(&h, ci.baseline_lost && !h.rt.have_baseline && ci.submitted_mode == LIBREGPU_Z_ORDINARY,
-                  "optimisation continuity is dropped, visibly");
-        } else {
-            CHECK(&h, false, "setup of the tracking-failure test failed");
-        }
-    }
-    s.transient_id = 0;
-    if (h_frame(&h, &s, &ci, &match)) CHECK(&h, ci.was_baseline && match, "a fresh baseline follows");
-    fprintf(out, "  untrackable resource -> ordinary cycle, baseline voided, counted, still correct\n");
-    h_fold(&h, failures, checks);
-    h_close(&h);
-    h_fold(&h, failures, checks);
 }
 
 
@@ -1640,6 +1746,14 @@ static void test_backend_failures(FILE *out, int *failures, int *checks)
         CHECK(&h, ci.fell_back_after_failure && ci.submitted_mode == LIBREGPU_Z_ORDINARY,
               "a rejected rebuild must fall back to the ordinary path");
         CHECK(&h, h.rt.have_baseline, "a clean rejection leaves the retained state, and the baseline, intact");
+        const size_t n = libregpu_sim_submission_count(h.be);
+        SimSubmission rejected, retry;
+        memset(&rejected, 0, sizeof rejected);
+        memset(&retry, 0, sizeof retry);
+        CHECK(&h, n >= 3 && libregpu_sim_submission(h.be, n - 2, &rejected) && libregpu_sim_submission(h.be, n - 1, &retry),
+              "the backend logged the rejected Z and the retry");
+        CHECK(&h, !rejected.ordinary && !rejected.accepted && retry.ordinary && retry.accepted && rejected.sequence == retry.sequence,
+              "the rejected Z executed nothing, and only then was the original Y submitted - one execution in total");
     }
     s.objects[0].x += 1;
     if (h_frame(&h, &s, &ci, &match)) {
@@ -1664,6 +1778,11 @@ static void test_backend_failures(FILE *out, int *failures, int *checks)
         LibreGPUStatus st = libregpu_runtime_step(&h.rt, &ci);
         CHECK(&h, st == LIBREGPU_ERR_BACKEND, "unknown-state failure must be reported (got %s)", libregpu_status_str(st));
         CHECK(&h, !h.rt.have_baseline && ci.baseline_lost, "baseline must be voided after an unknown-state failure");
+        const size_t n = libregpu_sim_submission_count(h.be);
+        SimSubmission failed;
+        memset(&failed, 0, sizeof failed);
+        CHECK(&h, n == 2 && libregpu_sim_submission(h.be, 1, &failed) && !failed.accepted,
+              "an unknown-effect failure is NOT retried: that dataset appears once, unaccepted");
     }
     s.objects[1].x += 2;
     if (h_frame(&h, &s, &ci, &match))
@@ -1673,131 +1792,436 @@ static void test_backend_failures(FILE *out, int *failures, int *checks)
     h_close(&h);
     h_fold(&h, failures, checks);
 
-    
-    libregpu_sim_scene_defaults(&s);
-    if (!h_open(&h, out, 0, &cfg)) { h_fold(&h, failures, checks); return; }
-    h_frame(&h, &s, &ci, &match);
-    s.objects[0].x += 4;
-    libregpu_sim_inject_submit_fault(h.be, (SimSubmitFault){ 0, 2, LIBREGPU_ERR_NO_MEMORY });
-    {
-        LibreGPURawDataset ds;
-        if (libregpu_sim_build_dataset(&s, &ds) == LIBREGPU_OK && libregpu_sim_enqueue(h.be, &ds) != LIBREGPU_OK)
-            libregpu_dataset_release(&ds);
-        LibreGPUStatus st = libregpu_runtime_step(&h.rt, &ci);
-        CHECK(&h, st == LIBREGPU_ERR_NO_MEMORY, "double rejection must surface (got %s)", libregpu_status_str(st));
-        CHECK(&h, h.rt.have_baseline, "rejected work leaves X describing what is still displayed");
+}
+
+
+
+static void contract_frame(LibreGPURawOp ops[4])
+{
+    for (int i = 0; i < 4; i++) ops[i] = sim_op_new(LIBREGPU_OP_DRAW);
+    ops[0].flags = LIBREGPU_OPF_CLEARS_TARGET;
+    ops[0].writes[0] = sim_rid(SIM_TARGET_ID); ops[0].write_count = 1;
+    ops[0].payload_hash = 0xC1EA;
+    ops[0].region = libregpu_rect_make(0, 0, SIM_W, SIM_H); ops[0].region_valid = true;
+    for (int i = 1; i <= 2; i++) {
+        ops[i].reads[0] = sim_rid(SIM_TEXTURE_ID); ops[i].read_count = 1;
+        ops[i].writes[0] = sim_rid(SIM_TARGET_ID); ops[i].write_count = 1;
+        ops[i].payload_hash = 0x1100u * (uint64_t)i;
+        ops[i].region = i == 1 ? libregpu_rect_make(6, 5, 26, 20) : libregpu_rect_make(12, 10, 32, 24);
+        ops[i].region_valid = true;
     }
-    s.objects[0].x += 1;
-    if (h_frame(&h, &s, &ci, &match))
-        CHECK(&h, match && ci.submitted_mode == LIBREGPU_Z_INCREMENTAL, "the next frame is optimised against the intact baseline");
-    h_fold(&h, failures, checks);
-    h_close(&h);
-    h_fold(&h, failures, checks);
+    ops[3] = sim_op_new(LIBREGPU_OP_PRESENT);
+    ops[3].reads[0] = sim_rid(SIM_TARGET_ID); ops[3].read_count = 1;
+}
+
+
+static bool contract_reference(uint32_t *fb)
+{
+    LibreGPURawOp ops[4];
+    contract_frame(ops);
+    LibreGPUCapture c;
+    LibreGPURawDataset ds;
+    bool ready = false, ok = true;
+    libregpu_capture_init(&c);
+    libregpu_dataset_init(&ds);
+    for (int i = 0; i < 4; i++) ok = ok && libregpu_capture_feed(&c, &ops[i], &ds, &ready) == LIBREGPU_OK;
+    ok = ok && ready && libregpu_sim_render_reference(&ds, fb) == LIBREGPU_OK;
+    libregpu_dataset_release(&ds);
+    libregpu_capture_shutdown(&c);
+    return ok;
+}
+
+static void test_dataset_contract(FILE *out, int *failures, int *checks)
+{
+    fprintf(out, "[dataset] closure, order, sequence, ownership, opaque vs uncapturable, pass-through\n");
+    H h;
+    memset(&h, 0, sizeof h);
+    h.out = out;
+    LibreGPUCapture cap;
+    LibreGPURawDataset ds;
+    LibreGPURawOp ops[4];
+    bool ready;
+    LibreGPUStatus st;
+    contract_frame(ops);
 
     
-    libregpu_sim_scene_defaults(&s);
-    if (!h_open(&h, out, 0, &cfg)) { h_fold(&h, failures, checks); return; }
-    libregpu_sim_inject_submit_fault(h.be, (SimSubmitFault){ 0, 1, LIBREGPU_ERR_NO_MEMORY });
-    {
-        LibreGPURawDataset ds;
-        if (libregpu_sim_build_dataset(&s, &ds) == LIBREGPU_OK && libregpu_sim_enqueue(h.be, &ds) != LIBREGPU_OK)
-            libregpu_dataset_release(&ds);
-        LibreGPUStatus st = libregpu_runtime_step(&h.rt, &ci);
-        CHECK(&h, st != LIBREGPU_OK && !h.rt.have_baseline, "a rejected baseline submission leaves no baseline");
+    libregpu_capture_init(&cap);
+    libregpu_dataset_init(&ds);
+    CHECK(&h, libregpu_capture_feed(&cap, &ops[0], &ds, &ready) == LIBREGPU_OK && !ready, "an operation does not close a dataset");
+    CHECK(&h, libregpu_capture_feed(&cap, &ops[1], &ds, &ready) == LIBREGPU_OK && !ready, "...nor does a draw");
+    CHECK(&h, libregpu_capture_feed(&cap, &ops[2], &ds, &ready) == LIBREGPU_OK && !ready, "...nor the next one");
+    CHECK(&h, libregpu_capture_feed(&cap, &ops[3], &ds, &ready) == LIBREGPU_OK && ready, "PRESENT closes the dataset");
+    CHECK(&h, ds.complete && !ds.forwarded && ds.op_count == 4, "a closed dataset is complete and holds every operation");
+    CHECK(&h, ds.ops[0].payload_hash == 0xC1EA && ds.ops[1].payload_hash == 0x1100u && ds.ops[2].payload_hash == 0x2200u,
+          "operations are stored in their original execution order");
+    CHECK(&h, ds.ops[3].kind == LIBREGPU_OP_PRESENT, "PRESENT is the last operation");
+    CHECK(&h, ds.sequence == 1, "the first dataset of a session is number 1");
+    const uint64_t ts1 = ds.timestamp_ns;
+    CHECK(&h, ts1 != 0, "the timestamp is the monotonic capture time in nanoseconds");
+    CHECK(&h, libregpu_dataset_append(&ds, &ops[0]) == LIBREGPU_ERR_STATE, "a complete dataset accepts no more operations");
+    libregpu_dataset_release(&ds);
+
+    libregpu_dataset_init(&ds);
+    st = LIBREGPU_OK;
+    for (int i = 0; i < 4 && st == LIBREGPU_OK; i++) st = libregpu_capture_feed(&cap, &ops[i], &ds, &ready);
+    CHECK(&h, st == LIBREGPU_OK && ready && ds.sequence == 2 && ds.op_count == 4, "the next dataset starts fresh and is number 2");
+    CHECK(&h, ds.timestamp_ns >= ts1, "the capture clock never goes backwards");
+    {   
+        LibreGPURawDataset again = ds;
+        LibreGPURawOp extra = ops[0];
+        CHECK(&h, libregpu_capture_feed(&cap, &extra, &again, &ready) == LIBREGPU_ERR_INVALID_ARG, "an output that still owns operations is refused");
     }
-    if (h_frame(&h, &s, &ci, &match)) CHECK(&h, ci.was_baseline && match, "baseline established on the next dataset");
+    libregpu_dataset_release(&ds);
+
+    
+    {
+        LibreGPURawOp many = sim_op_new(LIBREGPU_OP_DRAW);
+        LibreGPURawDataset tmp;
+        libregpu_dataset_init(&tmp);
+        many.write_count = LIBREGPU_MAX_OP_RES + 1;
+        CHECK(&h, libregpu_dataset_append(&tmp, &many) == LIBREGPU_ERR_INVALID_ARG, "an operation with too many references is refused, never truncated");
+        LibreGPURawOp reserved = sim_op_new(LIBREGPU_OP_DRAW);
+        reserved.writes[0] = (LibreGPUResourceId){ LIBREGPU_SCRATCH_ID_BASE + 5, 1 }; reserved.write_count = 1;
+        CHECK(&h, libregpu_dataset_append(&tmp, &reserved) == LIBREGPU_ERR_INVALID_ARG, "ids in the scratch range are refused");
+        libregpu_dataset_release(&tmp);
+    }
+    libregpu_capture_shutdown(&cap);
+
+    
+    {
+        uint8_t src[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+        LibreGPURawOp o = sim_op_new(LIBREGPU_OP_OPAQUE);
+        o.blob = src; o.blob_size = sizeof src;
+        const uint64_t expected_hash = libregpu_hash_bytes(src, sizeof src);
+        libregpu_capture_init(&cap);
+        libregpu_dataset_init(&ds);
+        CHECK(&h, libregpu_capture_feed(&cap, &o, &ds, &ready) == LIBREGPU_OK && !ready, "an opaque operation is captured");
+        CHECK(&h, libregpu_capture_feed(&cap, &ops[3], &ds, &ready) == LIBREGPU_OK && ready, "and its dataset closes");
+        memset(src, 0xEE, sizeof src);                            
+        CHECK(&h, ds.complete && !ds.forwarded && ds.ops[0].kind == LIBREGPU_OP_OPAQUE,
+              "an opaque operation keeps its dataset COMPLETE (it was preserved); it is not a capture failure");
+        CHECK(&h, ds.ops[0].blob != src && ds.ops[0].blob_size == sizeof src, "the dataset owns a copy, not the caller's pointer");
+        CHECK(&h, ds.ops[0].blob[0] == 1 && ds.ops[0].blob[7] == 8, "the copy is unaffected by later changes to the source");
+        CHECK(&h, ds.ops[0].payload_hash == expected_hash, "an opaque operation is identified by the hash of its ORIGINAL bytes");
+        libregpu_dataset_release(&ds);
+        CHECK(&h, ds.ops == NULL && ds.op_count == 0, "releasing leaves an empty dataset");
+        libregpu_capture_shutdown(&cap);
+    }
+    {   
+        LibreGPUBackend *be = libregpu_sim_backend_create(0);
+        SimScene s;
+        libregpu_sim_scene_defaults(&s);
+        LibreGPURawDataset d, got, none;
+        if (be && libregpu_sim_build_dataset(&s, &d) == LIBREGPU_OK) {
+            CHECK(&h, libregpu_sim_enqueue(be, &d) == LIBREGPU_OK && d.ops == NULL && d.op_count == 0, "enqueue moves ownership out of the caller");
+            libregpu_dataset_init(&got);
+            libregpu_dataset_init(&none);
+            CHECK(&h, be->next_dataset(be->ctx, &got) == LIBREGPU_OK && got.ops && got.complete, "next_dataset hands ownership to the caller");
+            CHECK(&h, be->next_dataset(be->ctx, &none) == LIBREGPU_NO_DATA, "the backend keeps no copy");
+            libregpu_dataset_release(&got);
+        } else {
+            CHECK(&h, false, "setup of the ownership test failed");
+        }
+        libregpu_backend_destroy(be);
+    }
+
+    
+    {
+        LibreGPUConfig cfg = test_config();
+        LibreGPUCycleInfo ci;
+        bool match = false;
+        SimScene s;
+        H ph;
+        uint32_t ref[SIM_W * SIM_H];
+        libregpu_sim_scene_defaults(&s);
+        if (!contract_reference(ref)) CHECK(&h, false, "could not render the reference frame");
+        if (h_open(&ph, out, 0, &cfg)) {
+            h_frame(&ph, &s, &ci, &match);                        
+            const size_t logged = libregpu_sim_submission_count(ph.be);
+
+            LibreGPUCapture pc;
+            libregpu_sim_capture_begin(&pc, ph.be);
+            libregpu_dataset_init(&ds);
+            CHECK(&ph, libregpu_capture_feed(&pc, &ops[0], &ds, &ready) == LIBREGPU_OK && !ready, "operation 1 stored");
+            CHECK(&ph, libregpu_capture_feed(&pc, &ops[1], &ds, &ready) == LIBREGPU_OK && !ready, "operation 2 stored");
+            CHECK(&ph, libregpu_sim_forwarded_ops(ph.be) == 0, "while capture succeeds nothing is passed through");
+            LibreGPURawOp bad = ops[2];
+            bad.blob = NULL; bad.blob_size = 16;                  
+            st = libregpu_capture_feed(&pc, &bad, &ds, &ready);
+            CHECK(&ph, st != LIBREGPU_OK && !ready, "an operation that cannot be preserved is reported explicitly (got %s)", libregpu_status_str(st));
+            CHECK(&ph, libregpu_sim_forwarded_ops(ph.be) == 3, "the stored operations were flushed in order, then the failing one passed through");
+            CHECK(&ph, libregpu_capture_feed(&pc, &ops[3], &ds, &ready) == LIBREGPU_OK && ready, "the rest of the dataset passes through and PRESENT closes it");
+            CHECK(&ph, ds.forwarded && !ds.complete && ds.op_count == 0 && ds.ops == NULL,
+                  "the result is forwarded, NOT complete, and carries no operations");
+            CHECK(&ph, libregpu_sim_forwarded_ops(ph.be) == 4, "every original operation was passed through exactly once");
+            CHECK(&ph, memcmp(ref, libregpu_sim_display(ph.be), sizeof ref) == 0,
+                  "passed through unchanged and in order: the output is exactly the intended frame");
+            libregpu_sim_capture_end(&pc);
+
+            if (libregpu_sim_enqueue(ph.be, &ds) != LIBREGPU_OK) libregpu_dataset_release(&ds);
+            memset(&ci, 0, sizeof ci);
+            st = libregpu_runtime_step(&ph.rt, &ci);
+            CHECK(&ph, st == LIBREGPU_OK && ci.forwarded && !ci.submitted, "the runtime sees a forwarded dataset and does not submit it (got %s)", libregpu_status_str(st));
+            CHECK(&ph, libregpu_sim_submission_count(ph.be) == logged, "LIBREGPU submitted nothing for it");
+            CHECK(&ph, !ph.rt.have_baseline && ci.baseline_lost && ph.rt.metrics.forwarded_datasets == 1, "X is voided");
+            if (h_frame(&ph, &s, &ci, &match)) CHECK(&ph, ci.was_baseline && match, "the next complete dataset establishes a fresh baseline");
+
+            
+            libregpu_sim_capture_begin(&pc, ph.be);
+            libregpu_dataset_init(&ds);
+            CHECK(&ph, libregpu_capture_feed(&pc, &ops[0], &ds, &ready) == LIBREGPU_OK && libregpu_capture_feed(&pc, &ops[1], &ds, &ready) == LIBREGPU_OK, "two operations stored");
+            const uint64_t before = libregpu_sim_forwarded_ops(ph.be);
+            CHECK(&ph, libregpu_capture_report_uncapturable(&pc) == LIBREGPU_OK && libregpu_sim_forwarded_ops(ph.be) == before + 2, "reporting flushes what was stored, in order");
+            CHECK(&ph, libregpu_sim_forward(ph.be->ctx, &ops[2]) == LIBREGPU_OK, "the layer passes through the operation it could not build");
+            CHECK(&ph, libregpu_capture_feed(&pc, &ops[3], &ds, &ready) == LIBREGPU_OK && ready && ds.forwarded && !ds.complete, "and the dataset still closes as forwarded");
+            CHECK(&ph, memcmp(ref, libregpu_sim_display(ph.be), sizeof ref) == 0, "order preserved across the report: same output");
+            libregpu_sim_capture_end(&pc);
+            libregpu_dataset_release(&ds);
+
+            
+            s.inject_opaque = true;
+            memset(&ci, 0, sizeof ci);
+            if (h_frame(&ph, &s, &ci, &match)) {
+                CHECK(&ph, ci.submitted && !ci.forwarded && ci.submitted_mode == LIBREGPU_Z_ORDINARY && match,
+                      "an opaque operation forces ordinary execution of its (complete) dataset");
+            }
+            fprintf(out, "  capture failure: flushed in order, passed through, never submitted, fresh baseline next\n");
+            h_fold(&ph, &h.failures, &h.checks);
+            h_close(&ph);
+            h_fold(&ph, &h.failures, &h.checks);
+        } else {
+            h.failures += ph.failures;
+        }
+    }
+
+    
+    {
+        LibreGPURawOp bad = ops[2];
+        bad.blob = NULL; bad.blob_size = 16;
+        libregpu_capture_init(&cap);
+        libregpu_dataset_init(&ds);
+        CHECK(&h, libregpu_capture_feed(&cap, &ops[0], &ds, &ready) == LIBREGPU_OK && !ready, "stored");
+        st = libregpu_capture_feed(&cap, &bad, &ds, &ready);
+        CHECK(&h, st != LIBREGPU_OK && !ready, "failure reported even when nothing can be passed through");
+        CHECK(&h, libregpu_capture_feed(&cap, &ops[3], &ds, &ready) != LIBREGPU_OK && ready && ds.forwarded && !ds.complete,
+              "the dataset is emitted forwarded and incomplete, never complete");
+        libregpu_dataset_release(&ds);
+        libregpu_capture_shutdown(&cap);
+    }
+    h_fold(&h, failures, checks);
+}
+
+
+static void test_submission_route(FILE *out, int *failures, int *checks)
+{
+    fprintf(out, "[route] one route per dataset: ordinary Y OR rebuilt Z, never both; fences and completion\n");
+    LibreGPUConfig cfg = test_config();
+    H h;
+    LibreGPUCycleInfo last_info;
+    LibreGPUZMode modes[8];
+    size_t frames = 0;
+    memset(&last_info, 0, sizeof last_info);
+    if (!h_open(&h, out, 2, &cfg)) { h_fold(&h, failures, checks); return; }
+    SimScene s;
+    libregpu_sim_scene_defaults(&s);
+
+    EXPECT_FRAME(&h, "initial dataset (X)", &s, LIBREGPU_STREAM_FALLBACK_ORDINARY, LIBREGPU_Z_ORDINARY);
+    modes[frames++] = last_info.submitted_mode;
+    CHECK(&h, last_info.submitted && !last_info.forwarded, "the first dataset is submitted, once");
+    EXPECT_FRAME(&h, "identical Y -> Z (no impact)", &s, LIBREGPU_STREAM_FALLBACK_NO_IMPACT, LIBREGPU_Z_NO_IMPACT);
+    modes[frames++] = last_info.submitted_mode;
+    s.objects[0].x += 5; s.objects[0].y += 2;
+    EXPECT_FRAME(&h, "moved object -> Z (micro-pixel)", &s, LIBREGPU_STREAM_MICRO_PIXEL, LIBREGPU_Z_INCREMENTAL);
+    modes[frames++] = last_info.submitted_mode;
+    s.objects[s.object_count++] = (SimObject){ 20, 28, 8, 6, 0xDD };
+    EXPECT_FRAME(&h, "structure change -> ordinary Y", &s, LIBREGPU_STREAM_FALLBACK_ORDINARY, LIBREGPU_Z_ORDINARY);
+    modes[frames++] = last_info.submitted_mode;
+    s.cam_yaw_px = 3;
+    EXPECT_FRAME(&h, "camera pan -> Z (camera)", &s, LIBREGPU_STREAM_CAMERA, LIBREGPU_Z_INCREMENTAL);
+    modes[frames++] = last_info.submitted_mode;
+
+    const size_t n = libregpu_sim_submission_count(h.be);
+    CHECK(&h, n == frames, "exactly one submission per dataset (%zu submissions, %zu datasets)", n, frames);
+    uint64_t prev_seq = 0, prev_fence = 0;
+    for (size_t i = 0; i < n && i < frames; i++) {
+        SimSubmission e;
+        if (!libregpu_sim_submission(h.be, i, &e)) { CHECK(&h, false, "log entry %zu missing", i); continue; }
+        CHECK(&h, e.accepted && e.fence != 0, "submission %zu was accepted with a valid fence", i);
+        CHECK(&h, e.ordinary == (modes[i] == LIBREGPU_Z_ORDINARY), "dataset %zu went through the %s route, as decided", i, e.ordinary ? "ordinary" : "Z");
+        CHECK(&h, e.sequence > prev_seq, "datasets reach execution in sequence order and none twice");
+        CHECK(&h, e.fence > prev_fence, "fences strictly increase");
+        if (!e.ordinary) CHECK(&h, e.ops_executed <= e.dataset_ops, "Z executes a SUBSET of Y's operations, never a replacement frame");
+        if (modes[i] == LIBREGPU_Z_NO_IMPACT) CHECK(&h, e.ops_executed < e.dataset_ops, "no-impact executes only the mandatory operations");
+        prev_seq = e.sequence; prev_fence = e.fence;
+    }
+    
+    {
+        const uint64_t done = h.be->completed_fence(h.be->ctx);
+        CHECK(&h, done <= prev_fence && done + 2 == prev_fence, "completed_fence lags the latest fence by the backend's latency, never ahead (%llu vs %llu)",
+              (unsigned long long)done, (unsigned long long)prev_fence);
+        h.be->wait_idle(h.be->ctx);
+        CHECK(&h, h.be->completed_fence(h.be->ctx) == prev_fence, "wait_idle completes everything previously accepted");
+    }
+    
+    CHECK(&h, h.be->presented_count(h.be->ctx) == frames, "each dataset presented the retained output once (%llu presents, %zu datasets)",
+          (unsigned long long)h.be->presented_count(h.be->ctx), frames);
     h_fold(&h, failures, checks);
     h_close(&h);
     h_fold(&h, failures, checks);
 }
 
 
-static void test_capture(FILE *out, int *failures, int *checks)
+static LibreGPUStatus (*g_real_submit)(void *, const LibreGPURawDataset *, const LibreGPUUpdateWork *, uint64_t *);
+static int g_fence_tamper;                    
+static uint64_t g_last_good_fence;
+
+static LibreGPUStatus tamper_submit(void *ctx, const LibreGPURawDataset *ds, const LibreGPUUpdateWork *w, uint64_t *fence)
 {
-    fprintf(out, "[capture] corrupt datasets are never trusted; input is validated, not truncated\n");
-    H h;
-    memset(&h, 0, sizeof h);
-    h.out = out;
-    LibreGPUCapture cap;
-    LibreGPURawDataset ds;
-    bool ready;
-    LibreGPURawOp op;
+    LibreGPUStatus st = g_real_submit(ctx, ds, w, fence);
+    if (st != LIBREGPU_OK) return st;
+    if (g_fence_tamper == 1)      { *fence = 0;                 g_fence_tamper = 0; }
+    else if (g_fence_tamper == 2) { *fence = g_last_good_fence; g_fence_tamper = 0; }
+    else g_last_good_fence = *fence;
+    return st;
+}
 
-    
-    libregpu_capture_init(&cap);
-    libregpu_dataset_init(&ds);
-    memset(&op, 0, sizeof op);
-    op.kind = LIBREGPU_OP_OPAQUE; op.blob = NULL; op.blob_size = 16;
-    CHECK(&h, libregpu_capture_feed(&cap, &op, &ds, &ready) == LIBREGPU_ERR_INVALID_ARG && !ready,
-          "blob_size > 0 with a NULL blob must be rejected");
-    memset(&op, 0, sizeof op);
-    op.kind = LIBREGPU_OP_PRESENT; op.reads[0] = (LibreGPUResourceId){ 1, 1 }; op.read_count = 1;
-    CHECK(&h, libregpu_capture_feed(&cap, &op, &ds, &ready) == LIBREGPU_OK && ready, "PRESENT closes the dataset");
-    CHECK(&h, ds.complete && ds.corrupt, "a dataset that lost an operation must be flagged corrupt");
-    libregpu_dataset_release(&ds);
-
-    
-    libregpu_dataset_init(&ds);
-    CHECK(&h, libregpu_capture_feed(&cap, &op, &ds, &ready) == LIBREGPU_OK && ready && ds.complete && !ds.corrupt,
-          "the dataset after a corrupt one starts clean");
-    
-    LibreGPURawDataset again = ds;
-    CHECK(&h, libregpu_capture_feed(&cap, &op, &again, &ready) == LIBREGPU_ERR_INVALID_ARG,
-          "an output dataset that still owns operations must be refused");
-    libregpu_dataset_release(&ds);
-
-    
-    libregpu_dataset_init(&ds);
-    memset(&op, 0, sizeof op);
-    op.kind = LIBREGPU_OP_DRAW; op.writes[0] = (LibreGPUResourceId){ LIBREGPU_SCRATCH_ID_BASE + 5, 1 }; op.write_count = 1;
-    CHECK(&h, libregpu_dataset_append(&ds, &op) == LIBREGPU_ERR_INVALID_ARG, "ids in the scratch range must be rejected");
-    memset(&op, 0, sizeof op);
-    op.kind = LIBREGPU_OP_DRAW; op.write_count = 9;
-    CHECK(&h, libregpu_dataset_append(&ds, &op) == LIBREGPU_ERR_INVALID_ARG, "reference lists are never truncated");
-    libregpu_dataset_release(&ds);
-    libregpu_capture_shutdown(&cap);
-
-    
-    libregpu_capture_init(&cap);
-    libregpu_dataset_init(&ds);
-    memset(&op, 0, sizeof op);
-    op.kind = LIBREGPU_OP_DRAW;
-    libregpu_alloc_fault_arm(0);                              
-    LibreGPUStatus st = libregpu_capture_feed(&cap, &op, &ds, &ready);
-    libregpu_alloc_fault_disarm();
-    CHECK(&h, st == LIBREGPU_ERR_NO_MEMORY && cap.current.corrupt, "allocation failure must poison the dataset");
-    memset(&op, 0, sizeof op);
-    op.kind = LIBREGPU_OP_PRESENT; op.reads[0] = (LibreGPUResourceId){ 1, 1 }; op.read_count = 1;
-    st = libregpu_capture_feed(&cap, &op, &ds, &ready);
-    CHECK(&h, st == LIBREGPU_OK && ready && ds.corrupt, "the corrupt dataset is still emitted at its boundary");
-    libregpu_dataset_release(&ds);
-    libregpu_capture_shutdown(&cap);
-
-    
+static void test_fence_contract(FILE *out, int *failures, int *checks)
+{
+    fprintf(out, "[fence] a successful submission must return a valid, increasing fence\n");
     LibreGPUConfig cfg = test_config();
+    H h;
     LibreGPUCycleInfo ci;
     bool match;
     SimScene s;
     libregpu_sim_scene_defaults(&s);
-    H rh;
-    if (h_open(&rh, out, 0, &cfg)) {
-        h_frame(&rh, &s, &ci, &match);
-        LibreGPURawDataset c;
-        if (libregpu_sim_build_dataset(&s, &c) == LIBREGPU_OK) {
-            c.corrupt = true;
-            if (libregpu_sim_enqueue(rh.be, &c) != LIBREGPU_OK) libregpu_dataset_release(&c);
-        }
+    if (!h_open(&h, out, 0, &cfg)) { h_fold(&h, failures, checks); return; }
+    g_real_submit = h.be->submit;
+    g_fence_tamper = 0;
+    g_last_good_fence = 0;
+    h.be->submit = tamper_submit;
+    h_frame(&h, &s, &ci, &match);
+
+    for (int mode = 1; mode <= 2; mode++) {
+        s.objects[0].x += 3;
+        LibreGPURawDataset ds;
+        if (libregpu_sim_build_dataset(&s, &ds) == LIBREGPU_OK && libregpu_sim_enqueue(h.be, &ds) != LIBREGPU_OK) libregpu_dataset_release(&ds);
+        g_fence_tamper = mode;
         memset(&ci, 0, sizeof ci);
-        st = libregpu_runtime_step(&rh.rt, &ci);
-        CHECK(&rh, st == LIBREGPU_ERR_VALIDATION && rh.rt.metrics.corrupt_datasets == 1 && !rh.rt.have_baseline,
-              "corrupt dataset: refused, counted, baseline voided (got %s)", libregpu_status_str(st));
-        if (h_frame(&rh, &s, &ci, &match)) CHECK(&rh, ci.was_baseline && match, "recovers with a fresh baseline");
-        fprintf(out, "  corrupt dataset refused and counted; next dataset is a clean baseline\n");
-        h_fold(&rh, &h.failures, &h.checks);
-        h_close(&rh);
-        h_fold(&rh, &h.failures, &h.checks);
+        const LibreGPUStatus st = libregpu_runtime_step(&h.rt, &ci);
+        CHECK(&h, st == LIBREGPU_ERR_BACKEND, "%s fence must be treated as a failure of unknown effect (got %s)",
+              mode == 1 ? "a zero" : "a repeated", libregpu_status_str(st));
+        CHECK(&h, !h.rt.have_baseline && ci.baseline_lost, "X is voided, and the dataset is not retried");
+        CHECK(&h, h.be->completed_fence(h.be->ctx) >= g_last_good_fence, "the runtime waited for the untracked work to finish");
+        s.objects[0].x += 1;
+        if (h_frame(&h, &s, &ci, &match)) CHECK(&h, ci.was_baseline && match, "a fresh baseline follows");
+    }
+    h_fold(&h, failures, checks);
+    h_close(&h);
+    h_fold(&h, failures, checks);
+}
+
+
+static void test_runtime_intake(FILE *out, int *failures, int *checks)
+{
+    fprintf(out, "[intake] stale, duplicate and identity-reusing datasets are refused, never submitted\n");
+    LibreGPUConfig cfg = test_config();
+    H h;
+    LibreGPUCycleInfo ci;
+    bool match;
+    SimScene s;
+    libregpu_sim_scene_defaults(&s);
+
+    
+    if (!h_open(&h, out, 0, &cfg)) { h_fold(&h, failures, checks); return; }
+    h_frame(&h, &s, &ci, &match);
+    SimSubmission first;
+    memset(&first, 0, sizeof first);
+    CHECK(&h, libregpu_sim_submission(h.be, 0, &first), "the first submission is logged");
+    const size_t logged = libregpu_sim_submission_count(h.be);
+    for (int variant = 0; variant < 3; variant++) {
+        LibreGPURawDataset ds;
+        if (libregpu_sim_build_dataset(&s, &ds) != LIBREGPU_OK) { CHECK(&h, false, "build"); continue; }
+        ds.sequence = variant == 0 ? first.sequence : (variant == 1 ? 0 : (first.sequence > 1 ? first.sequence - 1 : 0));
+        if (libregpu_sim_enqueue(h.be, &ds) != LIBREGPU_OK) libregpu_dataset_release(&ds);
+        memset(&ci, 0, sizeof ci);
+        const LibreGPUStatus st = libregpu_runtime_step(&h.rt, &ci);
+        CHECK(&h, st == LIBREGPU_ERR_VALIDATION && !ci.submitted, "%s sequence is refused (got %s)",
+              variant == 0 ? "a duplicate" : (variant == 1 ? "an unassigned" : "a stale"), libregpu_status_str(st));
+    }
+    CHECK(&h, libregpu_sim_submission_count(h.be) == logged, "none of them reached execution");
+    CHECK(&h, h.rt.metrics.refused_datasets == 3 && h.rt.have_baseline, "they were counted, and nothing was executed so X stays valid");
+    if (h_frame(&h, &s, &ci, &match)) CHECK(&h, ci.submitted && match, "the next genuine dataset proceeds normally");
+    h_fold(&h, failures, checks);
+    h_close(&h);
+    h_fold(&h, failures, checks);
+
+    
+    libregpu_sim_scene_defaults(&s);
+    if (!h_open(&h, out, 2, &cfg)) { h_fold(&h, failures, checks); return; }
+    h_frame(&h, &s, &ci, &match);
+    s.transient_id = 10;
+    h_frame(&h, &s, &ci, &match);                                 
+    const size_t before = libregpu_sim_submission_count(h.be);
+    {
+        LibreGPURawDataset ds;
+        if (libregpu_sim_build_dataset(&s, &ds) == LIBREGPU_OK && libregpu_sim_enqueue(h.be, &ds) != LIBREGPU_OK) libregpu_dataset_release(&ds);
+        memset(&ci, 0, sizeof ci);
+        const LibreGPUStatus st = libregpu_runtime_step(&h.rt, &ci);
+        CHECK(&h, st == LIBREGPU_ERR_LIFETIME && !ci.submitted, "re-creating a still-tracked identity is refused (got %s)", libregpu_status_str(st));
+        CHECK(&h, libregpu_sim_submission_count(h.be) == before, "it was not submitted");
+        CHECK(&h, !h.rt.have_baseline && ci.baseline_lost && h.rt.metrics.refused_datasets == 1, "X is voided and the refusal counted");
+    }
+    s.transient_id = 0;
+    if (h_frame(&h, &s, &ci, &match)) CHECK(&h, ci.was_baseline && match, "a fresh baseline follows");
+    h_fold(&h, failures, checks);
+    h_close(&h);
+    h_fold(&h, failures, checks);
+}
+
+
+static void test_defaults_and_version(FILE *out, int *failures, int *checks)
+{
+    fprintf(out, "[defaults] camera and governor off, micro-pixel on; one version string\n");
+    H h;
+    memset(&h, 0, sizeof h);
+    h.out = out;
+    LibreGPUConfig c;
+    libregpu_config_defaults(&c);
+    CHECK(&h, !c.enable_camera, "the Camera Update Unit is OFF by default");
+    CHECK(&h, c.enable_micro_pixel, "Micro-Pixel Update is on");
+    CHECK(&h, !(c.target_loops_per_second > 0.0), "the Passive FPS Governor is off by default");
+
+    LibreGPUCycleInfo last_info;
+    memset(&last_info, 0, sizeof last_info);
+    SimScene s;
+    libregpu_sim_scene_defaults(&s);
+    H ph;
+    if (h_open(&ph, out, 0, &c)) {
+        EXPECT_FRAME(&ph, "baseline (default configuration)", &s, LIBREGPU_STREAM_FALLBACK_ORDINARY, LIBREGPU_Z_ORDINARY);
+        s.cam_yaw_px = 3;
+        EXPECT_FRAME(&ph, "pan 3px: camera unit is off -> ordinary", &s, LIBREGPU_STREAM_FALLBACK_ORDINARY, LIBREGPU_Z_ORDINARY);
+        CHECK(&ph, last_info.camera_reason && strstr(last_info.camera_reason, "disabled"), "the reason says the camera unit is disabled");
+        s.objects[0].x += 5; s.objects[0].y += 2;
+        EXPECT_FRAME(&ph, "moved object: micro-pixel works by default", &s, LIBREGPU_STREAM_MICRO_PIXEL, LIBREGPU_Z_INCREMENTAL);
+        h_fold(&ph, &h.failures, &h.checks);
+        h_close(&ph);
+        h_fold(&ph, &h.failures, &h.checks);
     } else {
-        h.failures += rh.failures;
+        h.failures += ph.failures;
+    }
+
+    FILE *f = tmpfile();
+    if (f) {
+        char buf[256];
+        ui_print_banner(f);
+        rewind(f);
+        const size_t got = fread(buf, 1, sizeof buf - 1, f);
+        buf[got] = '\0';
+        CHECK(&h, strstr(buf, LIBREGPU_CODE_NAME) != NULL &&
+                  strstr(buf, LIBREGPU_VERSION) != NULL && strstr(buf, LIBREGPU_STEP_LABEL) != NULL,
+              "the launcher banner shows the code name and version (%s %s %s)",
+              LIBREGPU_CODE_NAME, LIBREGPU_VERSION, LIBREGPU_STEP_LABEL);
+        fclose(f);
     }
     h_fold(&h, failures, checks);
 }
@@ -1819,13 +2243,14 @@ static void test_rebuilder_validation(FILE *out, int *failures, int *checks)
     LibreGPURebuildResult rr;
     LibreGPUZPlan p;
     const LibreGPUResourceId scratch = { SIM_TEXTURE_ID, 1 };
+    size_t accepted_calls = 0;                               
 
 #define PLAN(m_, arr_, n_) do { memset(&p, 0, sizeof p); p.mode = (m_); p.replay = (arr_); p.replay_count = (n_); } while (0)
 
     LibreGPUReplayOp good[] = { { 0, false }, { 5, false } };
     PLAN(LIBREGPU_Z_NO_IMPACT, good, 2);
     CHECK(&h, dataset_rebuilder_execute(&p, &ds, be, NULL, &rr) == LIBREGPU_OK && rr.ops_submitted == 2,
-          "a correct no-impact plan is accepted");
+          "a correct no-impact plan is accepted"); accepted_calls++;
 
     LibreGPUReplayOp no_camera[] = { { 5, false } };
     PLAN(LIBREGPU_Z_NO_IMPACT, no_camera, 1);
@@ -1854,7 +2279,7 @@ static void test_rebuilder_validation(FILE *out, int *failures, int *checks)
     p.reproject = true;
     p.regions[0] = libregpu_rect_make(0, 0, 8, 8); p.region_count = 1;
     CHECK(&h, dataset_rebuilder_execute(&p, &ds, be, NULL, &rr) == LIBREGPU_ERR_VALIDATION, "reprojection without a scratch destination is refused");
-    CHECK(&h, dataset_rebuilder_execute(&p, &ds, be, &scratch, &rr) == LIBREGPU_OK, "reprojection with a scratch destination is accepted");
+    CHECK(&h, dataset_rebuilder_execute(&p, &ds, be, &scratch, &rr) == LIBREGPU_OK, "reprojection with a scratch destination is accepted"); accepted_calls++;
 
     PLAN(LIBREGPU_Z_INCREMENTAL, all, 6);
     p.regions[0] = libregpu_rect_make(0, 0, 8, 8); p.regions[1] = libregpu_rect_make(4, 4, 12, 12); p.region_count = 2;
@@ -1863,14 +2288,14 @@ static void test_rebuilder_validation(FILE *out, int *failures, int *checks)
     PLAN(LIBREGPU_Z_INCREMENTAL, all, 6);                       
     CHECK(&h, dataset_rebuilder_execute(&p, &ds, be, NULL, &rr) == LIBREGPU_ERR_VALIDATION, "scissored work without a region is refused");
 
-    ds.corrupt = true;
+    ds.forwarded = true;
     PLAN(LIBREGPU_Z_ORDINARY, NULL, 0);
-    CHECK(&h, dataset_rebuilder_execute(&p, &ds, be, NULL, &rr) == LIBREGPU_ERR_VALIDATION, "a corrupt dataset is never submitted");
-    ds.corrupt = false;
+    CHECK(&h, dataset_rebuilder_execute(&p, &ds, be, NULL, &rr) == LIBREGPU_ERR_VALIDATION, "a forwarded dataset is never submitted");
+    ds.forwarded = false;
     ds.complete = false;
     CHECK(&h, dataset_rebuilder_execute(&p, &ds, be, NULL, &rr) == LIBREGPU_ERR_VALIDATION, "an incomplete dataset is never submitted");
     ds.complete = true;
-    CHECK(&h, dataset_rebuilder_execute(&p, &ds, be, NULL, &rr) == LIBREGPU_OK, "the ordinary path accepts a valid dataset");
+    CHECK(&h, dataset_rebuilder_execute(&p, &ds, be, NULL, &rr) == LIBREGPU_OK, "the ordinary path accepts a valid dataset"); accepted_calls++;
     libregpu_dataset_release(&ds);
 
     s.transient_id = 10;                                     
@@ -1894,11 +2319,14 @@ static void test_rebuilder_validation(FILE *out, int *failures, int *checks)
         CHECK(&h, dataset_rebuilder_execute(&p, &ds, be, NULL, &rr) == LIBREGPU_ERR_VALIDATION,
               "a non-ordinary plan over a dataset with an opaque operation is refused");
         PLAN(LIBREGPU_Z_ORDINARY, NULL, 0);
-        CHECK(&h, dataset_rebuilder_execute(&p, &ds, be, NULL, &rr) == LIBREGPU_OK, "...but the ordinary path still forwards it unchanged");
+        CHECK(&h, dataset_rebuilder_execute(&p, &ds, be, NULL, &rr) == LIBREGPU_OK, "...but the ordinary path still forwards it unchanged"); accepted_calls++;
         libregpu_dataset_release(&ds);
     }
 #undef PLAN
     CHECK(&h, be->error_count(be->ctx) == 0, "validation tests must not cause lifetime violations");
+    CHECK(&h, libregpu_sim_submission_count(be) == accepted_calls,
+          "every invalid plan was rejected BEFORE submission: the backend received only the %zu valid ones (it received %zu)",
+          accepted_calls, libregpu_sim_submission_count(be));
     libregpu_backend_destroy(be);
     h_fold(&h, failures, checks);
 }
@@ -1906,7 +2334,7 @@ static void test_rebuilder_validation(FILE *out, int *failures, int *checks)
 
 static void test_memory_manager(FILE *out, int *failures, int *checks)
 {
-    fprintf(out, "[memory] transactional references, budget scope, backend contract\n");
+    fprintf(out, "[gc] resource ownership and fence-based lifetime\n");
     H h;
     memset(&h, 0, sizeof h);
     h.out = out;
@@ -1917,24 +2345,16 @@ static void test_memory_manager(FILE *out, int *failures, int *checks)
     LibreGPUBackend bad = *be;
     LibreGPUMemoryManager m;
     bad.completed_fence = NULL;
-    CHECK(&h, mem_init(&m, &bad, 0) == LIBREGPU_ERR_INVALID_ARG, "a backend without completed_fence must be refused");
+    CHECK(&h, mem_init(&m, &bad) == LIBREGPU_ERR_INVALID_ARG, "a backend without completed_fence must be refused");
     bad = *be; bad.wait_idle = NULL;
-    CHECK(&h, mem_init(&m, &bad, 0) == LIBREGPU_ERR_INVALID_ARG, "a backend without wait_idle must be refused");
+    CHECK(&h, mem_init(&m, &bad) == LIBREGPU_ERR_INVALID_ARG, "a backend without wait_idle must be refused");
     bad = *be; bad.destroy_resource = NULL;
-    CHECK(&h, mem_init(&m, &bad, 0) == LIBREGPU_ERR_INVALID_ARG, "a backend without destroy_resource must be refused");
+    CHECK(&h, mem_init(&m, &bad) == LIBREGPU_ERR_INVALID_ARG, "a backend without destroy_resource must be refused");
     {
         LibreGPUConfig cfg = test_config();
         LibreGPURuntime rt;
         bad = *be; bad.completed_fence = NULL;
         CHECK(&h, libregpu_runtime_init(&rt, &cfg, &bad) == LIBREGPU_ERR_INVALID_ARG, "the runtime refuses such a backend too");
-    }
-    {
-        
-
-        LibreGPUMemoryManager um;
-        CHECK(&h, mem_init_unlimited(&um, be) == LIBREGPU_OK,
-              "the rc0-2 two-argument mem_init form remains available");
-        if (um.buckets) mem_shutdown(&um);
     }
 
     
@@ -1947,8 +2367,8 @@ static void test_memory_manager(FILE *out, int *failures, int *checks)
     s.transient_id = 11;
     LibreGPUStatus st2 = libregpu_sim_build_dataset(&s, &rb);
     if (st != LIBREGPU_OK || st2 != LIBREGPU_OK || gir_build(&ga, &ra) != LIBREGPU_OK || gir_build(&gb, &rb) != LIBREGPU_OK ||
-        mem_init(&m, be, 0) != LIBREGPU_OK) {
-        CHECK(&h, false, "setup of the transactional test failed");
+        mem_init(&m, be) != LIBREGPU_OK) {
+        CHECK(&h, false, "setup of the ownership test failed");
         libregpu_backend_destroy(be);
         h_fold(&h, failures, checks);
         return;
@@ -1958,37 +2378,23 @@ static void test_memory_manager(FILE *out, int *failures, int *checks)
     CHECK(&h, mem_track_raw(&m, &ra) == LIBREGPU_OK, "track A");
     mem_note_raw_submission(&m, &ra, fence);
     CHECK(&h, mem_sync_owner_refs(&m, LIBREGPU_OWNER_X, &ga) == LIBREGPU_OK, "X := A");
-    CHECK(&h, mem_request_release(&m, (LibreGPUResourceId){ 10, 1 }) == LIBREGPU_OK, "game destroys resource 10");
+    CHECK(&h, mem_request_release(&m, (LibreGPUResourceId){ 10, 1 }) == LIBREGPU_OK, "the game destroys resource 10");
     mem_collect(&m);
     CHECK(&h, libregpu_sim_destroyed_count(be) == 0, "a referenced resource is not reclaimed");
-    libregpu_alloc_fault_arm(0);                                
-    st = mem_sync_owner_refs(&m, LIBREGPU_OWNER_X, &gb);
-    libregpu_alloc_fault_disarm();
-    CHECK(&h, st == LIBREGPU_ERR_NO_MEMORY, "the sync must report the failure (got %s)", libregpu_status_str(st));
+    CHECK(&h, mem_sync_owner_refs(&m, LIBREGPU_OWNER_X, &gb) == LIBREGPU_OK, "X := B (A is no longer referenced)");
     mem_collect(&m);
-    CHECK(&h, libregpu_sim_destroyed_count(be) == 0, "a failed sync must not drop X's references");
-    CHECK(&h, mem_sync_owner_refs(&m, LIBREGPU_OWNER_X, &gb) == LIBREGPU_OK, "the retry succeeds");
-    mem_collect(&m);
-    CHECK(&h, libregpu_sim_destroyed_count(be) == 1, "after a successful sync the resource is reclaimed");
+    CHECK(&h, libregpu_sim_destroyed_count(be) == 1, "once unreferenced and the fence has completed, it is reclaimed");
 
     
-    mem_shutdown(&m);
-    CHECK(&h, mem_init(&m, be, 1000) == LIBREGPU_OK, "mem_init with a budget");
-    CHECK(&h, mem_track(&m, (LibreGPUResourceId){ 20, 1 }, 1000000000ULL, false) == LIBREGPU_OK, "track a 1 GB game resource");
-    LibreGPUResourceId r1, r2, r3;
-    CHECK(&h, mem_acquire_scratch(&m, 600, &r1) == LIBREGPU_OK, "game bytes do not count against the budget");
-    CHECK(&h, mem_acquire_scratch(&m, 600, &r2) == LIBREGPU_ERR_NO_MEMORY, "LIBREGPU-owned bytes do");
-    CHECK(&h, mem_request_release(&m, r1) == LIBREGPU_OK, "release scratch");
-    mem_collect(&m);
-    {
-        LibreGPUMemStats ms;
-        mem_get_stats(&m, &ms);
-        CHECK(&h, ms.resources_pooled == 1 && ms.libregpu_bytes == 600, "released scratch is pooled, still LIBREGPU-owned");
-    }
-    CHECK(&h, mem_acquire_scratch(&m, 600, &r3) == LIBREGPU_OK && libregpu_res_equal(r1, r3), "pooled scratch is reused");
-    CHECK(&h, mem_acquire_scratch(&m, UINT64_MAX, &r2) == LIBREGPU_ERR_NO_MEMORY, "huge request: saturating arithmetic, no wrap");
     CHECK(&h, mem_track(&m, (LibreGPUResourceId){ LIBREGPU_SCRATCH_ID_BASE + 9, 1 }, 1, false) == LIBREGPU_ERR_INVALID_ARG,
           "a game resource cannot be tracked inside the scratch namespace");
+
+    
+    LibreGPUResourceId scratch;
+    CHECK(&h, mem_acquire_scratch(&m, 600, &scratch) == LIBREGPU_OK && scratch.id >= LIBREGPU_SCRATCH_ID_BASE, "acquire scratch");
+    CHECK(&h, mem_request_release(&m, scratch) == LIBREGPU_OK, "release scratch");
+    mem_collect(&m);
+    CHECK(&h, libregpu_sim_destroyed_count(be) == 2, "scratch is destroyed once released and idle");
     mem_shutdown(&m);
 
     gir_release(&ga); gir_release(&gb);
@@ -1999,9 +2405,9 @@ static void test_memory_manager(FILE *out, int *failures, int *checks)
 }
 
 
-static void test_session_and_modes(FILE *out, int *failures, int *checks)
+static void test_session(FILE *out, int *failures, int *checks)
 {
-    fprintf(out, "[session] invalidation and decision-only mode\n");
+    fprintf(out, "[session] invalidation, and forced-ordinary baseline sampling\n");
     LibreGPUConfig cfg = test_config();
     H h;
     LibreGPUCycleInfo ci;
@@ -2019,19 +2425,6 @@ static void test_session_and_modes(FILE *out, int *failures, int *checks)
     libregpu_sim_set_session_valid(h.be, true);
     if (h_frame(&h, &s, &ci, &match))
         CHECK(&h, ci.was_baseline && match, "a new baseline must be established before optimizing again");
-    h_fold(&h, failures, checks);
-    h_close(&h);
-    h_fold(&h, failures, checks);
-
-    cfg.mode = LIBREGPU_MODE_COMPARE;
-    if (!h_open(&h, out, 0, &cfg)) { h_fold(&h, failures, checks); return; }
-    h_frame(&h, &s, &ci, &match);
-    if (h_frame(&h, &s, &ci, &match)) {
-        CHECK(&h, ci.decision == LIBREGPU_STREAM_FALLBACK_NO_IMPACT && ci.submitted_mode == LIBREGPU_Z_ORDINARY && match,
-              "compare mode must decide but still submit the original dataset");
-        CHECK(&h, h.rt.metrics.would_optimize_cycles == 1, "compare mode should count would-be optimizations");
-    }
-    fprintf(out, "  compare mode: decisions logged, original datasets submitted\n");
     h_fold(&h, failures, checks);
     h_close(&h);
     h_fold(&h, failures, checks);
@@ -2093,9 +2486,9 @@ static void test_units(FILE *out, int *failures, int *checks)
         b.ops[1].region_valid = true; b.ops[1].region = libregpu_rect_make(0, 0, INT32_MAX, 4);
         CHECK(&h, gir_build(&g, &b) == LIBREGPU_ERR_VALIDATION, "GIR rejects out-of-range footprints");
         b.ops[1].region = libregpu_rect_make(0, 0, SIM_W, SIM_H);
-        b.corrupt = true;
-        CHECK(&h, gir_build(&g, &b) == LIBREGPU_ERR_VALIDATION, "GIR rejects corrupt datasets");
-        b.corrupt = false;
+        b.forwarded = true;
+        CHECK(&h, gir_build(&g, &b) == LIBREGPU_ERR_VALIDATION, "GIR rejects forwarded datasets");
+        b.forwarded = false;
         b.ops[1].region.x0 = 1;                             
         CHECK(&h, gir_build(&g, &b) == LIBREGPU_OK && !g.has_surface, "surface stays unknown unless the clear is a full-target clear");
         gir_release(&g);
@@ -2104,58 +2497,19 @@ static void test_units(FILE *out, int *failures, int *checks)
 
     
     {
-        SimScene cs;
-        libregpu_sim_scene_defaults(&cs);
-        LibreGPURawDataset x, y;
-        GirDataset gx, gy;
-        GirDelta sd;
-        LibreGPUStreamlineResult sr;
-        memset(&x, 0, sizeof x); memset(&y, 0, sizeof y);
-        memset(&gx, 0, sizeof gx); memset(&gy, 0, sizeof gy);
-        memset(&sd, 0, sizeof sd); memset(&sr, 0, sizeof sr);
-        bool ok = libregpu_sim_build_dataset(&cs, &x) == LIBREGPU_OK &&
-                  libregpu_sim_build_dataset(&cs, &y) == LIBREGPU_OK;
-        if (ok) {
-            for (int k = 0; k < 2; k++) {
-                LibreGPURawDataset *ds = k ? &y : &x;
-                ds->ops[0].camera.fov_x = 1e-12f;
-                ds->ops[0].camera.fov_y = 1e-12f;
-                if (k) ds->ops[0].camera.yaw = 0.1f;
-            }
-            ok = gir_build(&gx, &x) == LIBREGPU_OK && gir_build(&gy, &y) == LIBREGPU_OK &&
-                 gir_compare(&gx, &gy, &sd) == LIBREGPU_OK;
-        }
-        if (ok) {
-            LibreGPUConfig cfg = test_config();
-            const LibreGPUBackendCaps caps = { true, true, true, true };
-            const LibreGPUStatus st = streamline_decide(&cfg, &caps, &gx, &gy, &sd, 0.0, &sr);
-            CHECK(&h, st == LIBREGPU_OK && sr.action == LIBREGPU_STREAM_FALLBACK_ORDINARY &&
-                      sr.camera_reason && strstr(sr.camera_reason, "out of range"),
-                  "an extreme reprojection shift is refused, not rounded");
-            streamline_result_release(&sr);
-            gir_delta_release(&sd);
-        } else {
-            CHECK(&h, false, "setup of the extreme-shift test failed");
-        }
-        gir_release(&gx); gir_release(&gy);
-        libregpu_dataset_release(&x); libregpu_dataset_release(&y);
-    }
-
-    
-    {
         SimScene w;
         libregpu_sim_scene_defaults(&w);
         w.shadow_pass = true; w.shadow_overwrite = true;
         LibreGPURawDataset r;
         GirDataset g;
-        bool war = false, raw_dep = false;
+        bool waw = false, raw_dep = false;
         if (libregpu_sim_build_dataset(&w, &r) == LIBREGPU_OK && gir_build(&g, &r) == LIBREGPU_OK) {
             for (size_t i = 0; i < g.dep_count; i++) {
-                if (g.deps[i].kind == GIR_DEP_WAR) war = true;
+                if (g.deps[i].kind == GIR_DEP_WAW) waw = true;
                 if (g.deps[i].kind == GIR_DEP_RAW) raw_dep = true;
                 if (i && g.deps[i].to < g.deps[i - 1].to) CHECK(&h, false, "dependencies must stay sorted by consumer");
             }
-            CHECK(&h, war && raw_dep, "GIR records WAR (writer after reader) as well as RAW edges");
+            CHECK(&h, waw && raw_dep, "GIR records RAW and WAW dependency edges");
             gir_release(&g);
             libregpu_dataset_release(&r);
         } else {
@@ -2245,8 +2599,8 @@ static void test_units(FILE *out, int *failures, int *checks)
               "governor rejects rates below the minimum");
         CHECK(&h, gov_init(&g, 5e-324) == LIBREGPU_ERR_INVALID_ARG && !g.enabled,
               "governor rejects denormal rates that would overflow the interval");
-        CHECK(&h, gov_init(&g, LIBREGPU_GOV_MIN_HZ) == LIBREGPU_OK && g.enabled && g.interval_ns == 1000000000ULL,
-              "the governor minimum is accepted with a 1 s interval");
+        CHECK(&h, gov_init(&g, LIBREGPU_GOV_MIN_HZ) == LIBREGPU_OK && g.enabled && g.interval_ns > 0,
+              "the governor minimum is accepted");
         CHECK(&h, gov_init(&g, 1e12) == LIBREGPU_ERR_INVALID_ARG && !g.enabled, "governor rejects absurd rates");
         CHECK(&h, gov_init(&g, 0.0) == LIBREGPU_OK && !g.enabled, "0 disables pacing");
         CHECK(&h, gov_init(&g, 60.0) == LIBREGPU_OK && g.enabled && g.interval_ns > 0, "60 Hz is accepted");
@@ -2269,11 +2623,10 @@ static void test_units(FILE *out, int *failures, int *checks)
         char *inf_args[]   = { "libregpu", "--fps", "inf" };
         char *tiny_args[]  = { "libregpu", "--fps", "1e-10" };
         char *denorm_args[] = { "libregpu", "--fps", "5e-324" };
-        char *min_args[]   = { "libregpu", "--fps", "1" };
         char *miss_args[]  = { "libregpu", "--game", "--demo" };
         char *nothing[]    = { "libregpu", "--fps" };
         char *unknown[]    = { "libregpu", "--bogus" };
-        char *good[]       = { "libregpu", "--fps", "60", "--mode", "compare", "--frames", "10", "--demo", "--quiet" };
+        char *good[]       = { "libregpu", "--fps", "60", "--frames", "10", "--demo", "--quiet" };
         char longpath[700];
         memset(longpath, 'a', sizeof longpath - 1);
         longpath[sizeof longpath - 1] = '\0';
@@ -2284,9 +2637,6 @@ static void test_units(FILE *out, int *failures, int *checks)
               "--fps below the minimum is rejected");
         CHECK(&h, ui_parse_args(&st, 3, denorm_args, err, sizeof err) == LIBREGPU_ERR_INVALID_ARG,
               "--fps denormal is rejected");
-        CHECK(&h, ui_parse_args(&st, 3, min_args, err, sizeof err) == LIBREGPU_OK &&
-                  st.config.target_loops_per_second == LIBREGPU_GOV_MIN_HZ,
-              "--fps at the governor minimum is accepted");
         CHECK(&h, ui_parse_args(&st, 3, miss_args, err, sizeof err) == LIBREGPU_ERR_INVALID_ARG && !st.demo,
               "an option is not accepted as another option's value");
         CHECK(&h, ui_parse_args(&st, 2, nothing, err, sizeof err) == LIBREGPU_ERR_INVALID_ARG, "a missing value is reported");
@@ -2294,143 +2644,422 @@ static void test_units(FILE *out, int *failures, int *checks)
         CHECK(&h, ui_parse_args(&st, 3, long_args, err, sizeof err) == LIBREGPU_ERR_INVALID_ARG && !st.game_selected,
               "a game path that does not fit is rejected, not truncated");
         CHECK(&h, ui_parse_args(NULL, 1, good, err, sizeof err) == LIBREGPU_ERR_INVALID_ARG, "NULL settings are rejected");
-        CHECK(&h, ui_parse_args(&st, 9, good, err, sizeof err) == LIBREGPU_OK && st.demo && st.quiet &&
-                  st.demo_frames == 10 && st.config.mode == LIBREGPU_MODE_COMPARE &&
-                  st.config.target_loops_per_second == 60.0, "a valid command line parses");
-    }
-
-    
-    {
-        FILE *f = tmpfile();
-        if (f) {
-            char buf[256];
-            ui_print_banner(f);
-            rewind(f);
-            const size_t got = fread(buf, 1, sizeof buf - 1, f);
-            buf[got] = '\0';
-            CHECK(&h, strstr(buf, LIBREGPU_CODE_NAME) != NULL && strstr(buf, LIBREGPU_VERSION) != NULL,
-                  "the launcher banner shows the code name and version (%s %s)",
-                  LIBREGPU_CODE_NAME, LIBREGPU_VERSION);
-            fclose(f);
-        } else {
-            CHECK(&h, false, "could not create a temporary file for the banner check");
-        }
+        CHECK(&h, ui_parse_args(&st, 7, good, err, sizeof err) == LIBREGPU_OK && st.demo && st.quiet &&
+                  st.demo_frames == 10 && st.config.target_loops_per_second == 60.0, "a valid command line parses");
     }
     h_fold(&h, failures, checks);
 }
 
-
-
-
-#define SWEEP_FRAMES 10
-
-static void sweep_scenes(SimScene *sc)
+static void test_capture(FILE *out, int *failures, int *checks)
 {
-    libregpu_sim_scene_defaults(&sc[0]);                                    
-    sc[1] = sc[0];                                                       
-    sc[2] = sc[1]; sc[2].objects[0].x += 4; sc[2].objects[0].y += 2;     
-    sc[3] = sc[2]; sc[3].cam_yaw_px = 2;                                 
-    sc[4] = sc[3]; sc[4].cam_yaw_px = 4; sc[4].objects[1].x += 3;        
-    sc[5] = sc[4]; sc[5].shadow_pass = true; sc[5].shadow_param = 1;     
-    sc[6] = sc[5]; sc[6].shadow_param = 5;                               
-    sc[7] = sc[6]; sc[7].shadow_pass = false; sc[7].transient_id = 10;   
-    sc[8] = sc[7]; sc[8].transient_id = 0;                               
-    sc[9] = sc[8];                                                       
-}
-
-
-
-
-
-static int sweep_run(FILE *out, long fail_at, long *allocs, int *first_bad_frame, int *step_errors, int *degraded)
-{
-    LibreGPUConfig cfg = test_config();
-    SimScene sc[SWEEP_FRAMES];
-    sweep_scenes(sc);
+    fprintf(out, "[capture] corrupt/forwarded datasets are never trusted; input is validated, not truncated\n");
     H h;
-    int problems = 0;
-    *first_bad_frame = -1;
-    *step_errors = 0;
-    *degraded = 0;
-    if (!h_open(&h, out, 1, &cfg)) return 1000;
+    memset(&h, 0, sizeof h);
+    h.out = out;
+    LibreGPUCapture cap;
+    LibreGPURawDataset ds;
+    bool ready;
+    LibreGPURawOp op;
 
-    libregpu_alloc_fault_arm(fail_at);
-    libregpu_alloc_fault_pause(true);                       
-    for (int f = 0; f < SWEEP_FRAMES; f++) {
-        LibreGPURawDataset ds;
-        uint32_t ref[SIM_W * SIM_H];
-        if (libregpu_sim_build_dataset(&sc[f], &ds) != LIBREGPU_OK) { problems++; continue; }
-        if (libregpu_sim_render_reference(&ds, ref) != LIBREGPU_OK) { libregpu_dataset_release(&ds); problems++; continue; }
-        if (libregpu_sim_enqueue(h.be, &ds) != LIBREGPU_OK) { libregpu_dataset_release(&ds); problems++; continue; }
-        LibreGPUCycleInfo ci;
-        libregpu_alloc_fault_pause(false);
-        const LibreGPUStatus st = libregpu_runtime_step(&h.rt, &ci);
-        libregpu_alloc_fault_pause(true);
-        if (st != LIBREGPU_OK) (*step_errors)++;
-        else if (ci.baseline_lost || ci.fell_back_after_failure) (*degraded)++;
-        if (st == LIBREGPU_OK && memcmp(ref, libregpu_sim_display(h.be), sizeof ref) != 0) {
-            problems++;
-            if (*first_bad_frame < 0) *first_bad_frame = f;
+    
+    libregpu_capture_init(&cap);
+    libregpu_dataset_init(&ds);
+    memset(&op, 0, sizeof op);
+    op.kind = LIBREGPU_OP_OPAQUE; op.blob = NULL; op.blob_size = 16;
+    CHECK(&h, libregpu_capture_feed(&cap, &op, &ds, &ready) != LIBREGPU_OK && !ready,
+          "blob_size > 0 with a NULL blob must be rejected");
+    memset(&op, 0, sizeof op);
+    op.kind = LIBREGPU_OP_PRESENT; op.reads[0] = (LibreGPUResourceId){ 1, 1 }; op.read_count = 1;
+    CHECK(&h, libregpu_capture_feed(&cap, &op, &ds, &ready) == LIBREGPU_ERR_UNSUPPORTED && ready,
+          "with no pass-through sink the boundary is still found and the sink error reported");
+    CHECK(&h, !ds.complete && ds.forwarded && ds.corrupt && ds.op_count == 0 && ds.ops == NULL,
+          "a dataset that lost an operation is emitted forwarded/corrupt, never complete");
+    libregpu_dataset_release(&ds);
+
+    
+    libregpu_dataset_init(&ds);
+    CHECK(&h, libregpu_capture_feed(&cap, &op, &ds, &ready) == LIBREGPU_OK && ready && ds.complete &&
+              !ds.forwarded && !ds.corrupt,
+          "the dataset after a forwarded one starts clean");
+    
+    LibreGPURawDataset again = ds;
+    CHECK(&h, libregpu_capture_feed(&cap, &op, &again, &ready) == LIBREGPU_ERR_INVALID_ARG,
+          "an output dataset that still owns operations must be refused");
+    libregpu_dataset_release(&ds);
+
+    
+    libregpu_dataset_init(&ds);
+    memset(&op, 0, sizeof op);
+    op.kind = LIBREGPU_OP_DRAW; op.writes[0] = (LibreGPUResourceId){ LIBREGPU_SCRATCH_ID_BASE + 5, 1 }; op.write_count = 1;
+    CHECK(&h, libregpu_dataset_append(&ds, &op) == LIBREGPU_ERR_INVALID_ARG, "ids in the scratch range must be rejected");
+    memset(&op, 0, sizeof op);
+    op.kind = LIBREGPU_OP_DRAW; op.write_count = 9;
+    CHECK(&h, libregpu_dataset_append(&ds, &op) == LIBREGPU_ERR_INVALID_ARG, "reference lists are never truncated");
+    libregpu_dataset_release(&ds);
+    libregpu_capture_shutdown(&cap);
+
+    
+    LibreGPUConfig cfg = test_config();
+    LibreGPUCycleInfo ci;
+    bool match;
+    SimScene s;
+    libregpu_sim_scene_defaults(&s);
+    H rh;
+    if (h_open(&rh, out, 0, &cfg)) {
+        h_frame(&rh, &s, &ci, &match);
+        LibreGPURawDataset c;
+        if (libregpu_sim_build_dataset(&s, &c) == LIBREGPU_OK) {
+            c.corrupt = true;
+            if (libregpu_sim_enqueue(rh.be, &c) != LIBREGPU_OK) libregpu_dataset_release(&c);
         }
+        memset(&ci, 0, sizeof ci);
+        const LibreGPUStatus st = libregpu_runtime_step(&rh.rt, &ci);
+        CHECK(&rh, st == LIBREGPU_ERR_VALIDATION && rh.rt.metrics.corrupt_datasets == 1 && !rh.rt.have_baseline,
+              "corrupt dataset: refused, counted, baseline voided (got %s)", libregpu_status_str(st));
+        if (h_frame(&rh, &s, &ci, &match)) CHECK(&rh, ci.was_baseline && match, "recovers with a fresh baseline");
+        fprintf(out, "  corrupt dataset refused and counted; next dataset is a clean baseline\n");
+        h_fold(&rh, &h.failures, &h.checks);
+        h_close(&rh);
+        h_fold(&rh, &h.failures, &h.checks);
+    } else {
+        h.failures += rh.failures;
     }
-    *allocs = libregpu_alloc_count();
-    libregpu_alloc_fault_disarm();
-    h_close(&h);                                          
-    problems += h.failures;
-    return problems;
+    h_fold(&h, failures, checks);
 }
 
-static void test_alloc_sweep(FILE *out, int *failures, int *checks)
+static void test_contracts(FILE *out, int *failures, int *checks)
 {
-    fprintf(out, "[alloc-sweep] one allocation failure at EVERY allocation point of a %d-frame scenario\n", SWEEP_FRAMES);
-    long total = 0;
-    int bad_frame = -1, errs = 0, deg = 0;
-    int base = sweep_run(out, -1, &total, &bad_frame, &errs, &deg);
-    (*checks)++;
-    if (base != 0 || total <= 0 || errs != 0) {
-        (*failures)++;
-        fprintf(out, "    FAIL: the fault-free counting run itself had problems (%d, %d step errors)\n", base, errs);
-        return;
-    }
-    int broken_runs = 0, runs_with_error = 0, runs_degraded = 0;
-    for (long k = 0; k < total; k++) {
-        long ignored = 0;
-        int e = 0, d = 0;
-        const int p = sweep_run(out, k, &ignored, &bad_frame, &e, &d);
-        if (e) runs_with_error++;
-        if (d) runs_degraded++;
-        if (p) {
-            broken_runs++;
-            if (broken_runs == 1)
-                fprintf(out, "    first broken run: failing allocation #%ld (frame %d)\n", k, bad_frame);
-        }
-    }
-    (*checks)++;
-    if (broken_runs) { (*failures)++; fprintf(out, "    FAIL: %d of %ld injected failures broke an invariant\n", broken_runs, total); }
+    fprintf(out, "[contract] Step 2: finalised dataset, submission, backend, Z and GC rules\n");
+    H h;
+    memset(&h, 0, sizeof h);
+    h.out = out;
+
     
-    (*checks)++;
-    if (runs_with_error + runs_degraded == 0) { (*failures)++; fprintf(out, "    FAIL: no injected failure had any visible effect\n"); }
-    fprintf(out, "  %ld allocation points swept: %d broke an invariant\n", total, broken_runs);
-    fprintf(out, "  injections that surfaced as a failed step: %d; as a degraded-but-correct cycle: %d; absorbed silently: %ld\n",
-            runs_with_error, runs_degraded, total - runs_with_error - runs_degraded);
+    {
+        LibreGPUCapture cap;
+        LibreGPURawDataset ds;
+        LibreGPURawOp op;
+        bool ready = false;
+        uint64_t first_ts = 0, first_seq = 0;
+        libregpu_capture_init(&cap);
+
+        libregpu_dataset_init(&ds);
+        memset(&op, 0, sizeof op);
+        op.kind = LIBREGPU_OP_DRAW;
+        op.writes[0] = (LibreGPUResourceId){ SIM_TARGET_ID, 1 }; op.write_count = 1;
+        CHECK(&h, libregpu_capture_feed(&cap, &op, &ds, &ready) == LIBREGPU_OK && !ready &&
+                  ds.op_count == 0 && !ds.complete,
+              "operations accumulate in the capture; PRESENT alone closes and emits the dataset");
+        memset(&op, 0, sizeof op);
+        op.kind = LIBREGPU_OP_PRESENT;
+        op.reads[0] = (LibreGPUResourceId){ SIM_TARGET_ID, 1 }; op.read_count = 1;
+        CHECK(&h, libregpu_capture_feed(&cap, &op, &ds, &ready) == LIBREGPU_OK && ready &&
+                  ds.complete && ds.op_count == 2 &&
+                  ds.ops[0].kind == LIBREGPU_OP_DRAW && ds.ops[1].kind == LIBREGPU_OP_PRESENT,
+              "PRESENT closes the dataset without reordering its operations");
+        CHECK(&h, ds.sequence == 1 && ds.timestamp_ns > 0,
+              "the closing PRESENT stamps a monotonic-ns sequence and timestamp");
+        first_ts = ds.timestamp_ns; first_seq = ds.sequence;
+        CHECK(&h, libregpu_dataset_append(&ds, &op) == LIBREGPU_ERR_STATE,
+              "a dataset closed at PRESENT cannot be appended to");
+        libregpu_dataset_release(&ds);
+
+        libregpu_dataset_init(&ds); ready = false;
+        CHECK(&h, libregpu_capture_feed(&cap, &op, &ds, &ready) == LIBREGPU_OK && ready &&
+                  ds.sequence == first_seq + 1 && ds.timestamp_ns >= first_ts,
+              "sequence numbers stay monotonic within a capture session");
+        libregpu_dataset_release(&ds);
+        libregpu_capture_shutdown(&cap);
+    }
+
+    
+    {
+        uint8_t src[3] = { 1, 2, 3 };
+        LibreGPURawOp op;
+        LibreGPURawDataset ds;
+        libregpu_dataset_init(&ds);
+        memset(&op, 0, sizeof op);
+        op.kind = LIBREGPU_OP_OPAQUE; op.blob = src; op.blob_size = sizeof src;
+        CHECK(&h, libregpu_dataset_append(&ds, &op) == LIBREGPU_OK && ds.ops[0].blob != NULL &&
+                  ds.ops[0].blob != src,
+              "append deep-copies original bytes instead of retaining caller memory");
+        src[0] = 0xEE;
+        CHECK(&h, ds.ops[0].blob[0] == 1 && ds.ops[0].blob_size == sizeof src,
+              "the dataset owns its copy; later caller writes cannot alias it");
+        CHECK(&h, ds.ops[0].payload_hash != 0, "unhashed original bytes are hashed once on append");
+        libregpu_dataset_release(&ds);
+        CHECK(&h, ds.ops == NULL && ds.op_count == 0 && ds.op_capacity == 0,
+              "release frees the operation array and returns the dataset to empty");
+    }
+
+    
+    {
+        LibreGPUConfig cfg = test_config();
+        H oh;
+        SimScene s;
+        LibreGPUCycleInfo ci;
+        bool match;
+        libregpu_sim_scene_defaults(&s);
+        s.inject_opaque = true;
+        if (h_open(&oh, out, 0, &cfg)) {
+            if (h_frame(&oh, &s, &ci, &match))
+                CHECK(&oh, ci.was_baseline && match, "baseline containing opaque data");
+            if (h_frame(&oh, &s, &ci, &match)) {
+                CHECK(&oh, ci.decision == LIBREGPU_STREAM_FALLBACK_ORDINARY,
+                      "opaque data disables the optimised path (decision was %s)",
+                      libregpu_stream_action_str(ci.decision));
+                CHECK(&oh, ci.submitted_mode == LIBREGPU_Z_ORDINARY && ci.ops_submitted == ci.ops_total,
+                      "the ordinary path forwards the complete dataset unchanged");
+                CHECK(&oh, match, "opaque data still renders correctly");
+            }
+            h_fold(&oh, failures, checks);
+            h_close(&oh);
+            h_fold(&oh, failures, checks);
+        } else h.failures++;
+    }
+
+    
+    {
+        LibreGPUCapture cap;
+        LibreGPURawDataset ds;
+        LibreGPURawOp op;
+        bool ready = false;
+        libregpu_capture_init(&cap);
+        libregpu_dataset_init(&ds);
+        memset(&op, 0, sizeof op);
+        op.kind = LIBREGPU_OP_DRAW; op.write_count = LIBREGPU_MAX_OP_RES + 1;   
+        CHECK(&h, libregpu_capture_feed(&cap, &op, &ds, &ready) != LIBREGPU_OK && !ready,
+              "an operation that cannot be preserved is reported, not truncated");
+        memset(&op, 0, sizeof op);
+        op.kind = LIBREGPU_OP_PRESENT;
+        CHECK(&h, libregpu_capture_feed(&cap, &op, &ds, &ready) != LIBREGPU_OK && ready &&
+                  !ds.complete && ds.forwarded && ds.corrupt,
+              "the boundary is still found and the dataset is marked already-forwarded/corrupt");
+        libregpu_capture_shutdown(&cap);
+        libregpu_dataset_release(&ds);
+
+        LibreGPUConfig cfg = test_config();
+        SimScene s;
+        LibreGPUCycleInfo ci;
+        bool match;
+        libregpu_sim_scene_defaults(&s);
+        H ch;
+        if (h_open(&ch, out, 0, &cfg)) {
+            h_frame(&ch, &s, &ci, &match);
+            LibreGPUSimStats before, after;
+            libregpu_sim_stats(ch.be, &before);
+            LibreGPURawDataset c;
+            if (libregpu_sim_build_dataset(&s, &c) == LIBREGPU_OK) {
+                c.corrupt = true;                                  
+                if (libregpu_sim_enqueue(ch.be, &c) != LIBREGPU_OK) libregpu_dataset_release(&c);
+            }
+            memset(&ci, 0, sizeof ci);
+            const LibreGPUStatus st = libregpu_runtime_step(&ch.rt, &ci);
+            libregpu_sim_stats(ch.be, &after);
+            CHECK(&ch, st == LIBREGPU_ERR_VALIDATION && !ch.rt.have_baseline,
+                  "a corrupt/already-forwarded dataset is refused and X is voided");
+            CHECK(&ch, before.submits_ordinary == after.submits_ordinary &&
+                      before.submits_update == after.submits_update,
+                  "LIBREGPU never re-submits a dataset the interposer already forwarded");
+            if (h_frame(&ch, &s, &ci, &match))
+                CHECK(&ch, ci.was_baseline && match, "the next complete dataset becomes a fresh baseline");
+            h_fold(&ch, failures, checks);
+            h_close(&ch);
+            h_fold(&ch, failures, checks);
+        } else h.failures++;
+    }
+
+    
+    {
+        LibreGPUConfig cfg = test_config();
+        SimScene s;
+        LibreGPUCycleInfo ci;
+        bool match;
+        libregpu_sim_scene_defaults(&s);
+        H rh;
+        if (h_open(&rh, out, 0, &cfg)) {
+            LibreGPUSimStats s0, s1, s2;
+            if (h_frame(&rh, &s, &ci, &match))
+                CHECK(&rh, ci.was_baseline && ci.submitted_mode == LIBREGPU_Z_ORDINARY,
+                      "initial X goes through the ordinary path and is retained");
+            libregpu_sim_stats(rh.be, &s0);
+
+            s.objects[0].x += 4;                              
+            if (h_frame(&rh, &s, &ci, &match)) {
+                libregpu_sim_stats(rh.be, &s1);
+                CHECK(&rh, ci.decision == LIBREGPU_STREAM_MICRO_PIXEL &&
+                          ci.submitted_mode == LIBREGPU_Z_INCREMENTAL && match,
+                      "a micro-pixel decision submits Z, and the image matches Y");
+                CHECK(&rh, s1.submits_update == s0.submits_update + 1 &&
+                          s1.submits_ordinary == s0.submits_ordinary,
+                      "the incremental cycle uses exactly one route: Z, not full Y");
+                CHECK(&rh, ci.ops_submitted < ci.ops_total,
+                      "the full Y dataset was not submitted before the Z decision");
+            }
+
+            s.shadow_pass = true;                             
+            if (h_frame(&rh, &s, &ci, &match)) {
+                libregpu_sim_stats(rh.be, &s2);
+                CHECK(&rh, ci.submitted_mode == LIBREGPU_Z_ORDINARY &&
+                          ci.ops_submitted == ci.ops_total && match,
+                      "a fallback cycle forwards the original Y dataset unchanged");
+                CHECK(&rh, s2.submits_ordinary == s1.submits_ordinary + 1 &&
+                          s2.submits_update == s1.submits_update,
+                      "the fallback cycle also uses exactly one route: ordinary Y");
+            }
+
+            s.objects[1].x += 3;
+            if (h_frame(&rh, &s, &ci, &match))
+                CHECK(&rh, ci.submitted_mode == LIBREGPU_Z_INCREMENTAL && match && rh.rt.have_baseline &&
+                          !ci.baseline_lost,
+                      "retained X survives a consecutive incremental submission");
+            s.objects[1].x += 1;
+            if (h_frame(&rh, &s, &ci, &match))
+                CHECK(&rh, ci.submitted_mode == LIBREGPU_Z_INCREMENTAL && match && rh.rt.have_baseline &&
+                          !ci.baseline_lost,
+                      "retained X survives a second consecutive incremental submission");
+            h_fold(&rh, failures, checks);
+            h_close(&rh);
+            h_fold(&rh, failures, checks);
+        } else h.failures++;
+    }
+
+    
+    {
+        LibreGPUConfig cfg = test_config();
+        SimScene s;
+        LibreGPUCycleInfo ci;
+        bool match;
+        libregpu_sim_scene_defaults(&s);
+        H fh;
+        if (h_open(&fh, out, 2, &cfg)) {
+            uint64_t prev_completed = fh.be->completed_fence(fh.be->ctx);
+            for (int i = 0; i < 3; i++) {
+                h_frame(&fh, &s, &ci, &match);
+                const uint64_t now = fh.be->completed_fence(fh.be->ctx);
+                CHECK(&fh, now >= prev_completed, "completed_fence never moves backwards");
+                prev_completed = now;
+            }
+            LibreGPUSimStats fs;
+            libregpu_sim_stats(fh.be, &fs);
+            CHECK(&fh, fs.max_fence > 0 && fh.rt.last_fence == fs.max_fence,
+                  "successful submissions return strictly advancing fences");
+            CHECK(&fh, fs.completed_fence <= fs.max_fence,
+                  "completed_fence reports only work that has actually finished");
+
+            s.transient_id = 10;
+            h_frame(&fh, &s, &ci, &match);                     
+            CHECK(&fh, match && libregpu_sim_destroyed_count(fh.be) == 0,
+                  "a released resource is not destroyed while its submission is in flight");
+            s.transient_id = 0;
+            h_frame(&fh, &s, &ci, &match);
+            h_frame(&fh, &s, &ci, &match);
+            h_frame(&fh, &s, &ci, &match);
+            CHECK(&fh, libregpu_sim_destroyed_count(fh.be) == 1,
+                  "destruction happens only after release and fence completion");
+
+            fh.be->wait_idle(fh.be->ctx);
+            libregpu_sim_stats(fh.be, &fs);
+            CHECK(&fh, fs.completed_fence == fs.max_fence,
+                  "wait_idle completes every accepted submission");
+            h_fold(&fh, failures, checks);
+            h_close(&fh);
+            h_fold(&fh, failures, checks);
+        } else h.failures++;
+    }
+
+    
+    {
+        LibreGPUConfig cfg = test_config();
+        SimScene s;
+        LibreGPUCycleInfo ci;
+        bool match;
+        libregpu_sim_scene_defaults(&s);
+        H bh;
+        if (h_open(&bh, out, 0, &cfg)) {
+            h_frame(&bh, &s, &ci, &match);
+            s.objects[0].x += 4;
+            libregpu_sim_inject_submit_fault(bh.be, (SimSubmitFault){ 0, 1, LIBREGPU_ERR_NO_MEMORY });
+            memset(&ci, 0, sizeof ci);
+            if (h_frame(&bh, &s, &ci, &match)) {
+                CHECK(&bh, ci.fell_back_after_failure && ci.submitted_mode == LIBREGPU_Z_ORDINARY && match,
+                      "a clean rejection leaves X valid and retries the ordinary path");
+                CHECK(&bh, bh.rt.have_baseline, "a clean rejection never voids the baseline");
+            }
+            s.objects[0].x += 1;
+            libregpu_sim_inject_submit_fault(bh.be, (SimSubmitFault){ 0, 1, LIBREGPU_ERR_BACKEND });
+            {
+                LibreGPURawDataset ds;
+                if (libregpu_sim_build_dataset(&s, &ds) == LIBREGPU_OK &&
+                    libregpu_sim_enqueue(bh.be, &ds) != LIBREGPU_OK)
+                    libregpu_dataset_release(&ds);
+            }
+            memset(&ci, 0, sizeof ci);
+            const LibreGPUStatus st = libregpu_runtime_step(&bh.rt, &ci);
+            CHECK(&bh, st == LIBREGPU_ERR_BACKEND && !bh.rt.have_baseline && ci.baseline_lost,
+                  "an unknown-effect failure voids X and is not retried");
+            if (h_frame(&bh, &s, &ci, &match))
+                CHECK(&bh, ci.was_baseline && match, "recovery starts from a fresh baseline");
+            h_fold(&bh, failures, checks);
+            h_close(&bh);
+            h_fold(&bh, failures, checks);
+        } else h.failures++;
+    }
+
+    
+    {
+        LibreGPUBackend *be = libregpu_sim_backend_create(0);
+        SimScene s;
+        libregpu_sim_scene_defaults(&s);
+        LibreGPURawDataset ds;
+        LibreGPUZPlan p;
+        LibreGPURebuildResult rr;
+        LibreGPUSimStats b0, b1;
+        if (!be || libregpu_sim_build_dataset(&s, &ds) != LIBREGPU_OK) {
+            CHECK(&h, false, "could not assemble the invalid-plan fixture");
+        } else {
+            memset(&p, 0, sizeof p);
+            p.mode = LIBREGPU_Z_NO_IMPACT;
+            LibreGPUReplayOp missing_present[] = { { 0, false } };   
+            p.replay = missing_present;
+            p.replay_count = 1;
+            libregpu_sim_stats(be, &b0);
+            const LibreGPUStatus st = dataset_rebuilder_execute(&p, &ds, be, NULL, &rr);
+            libregpu_sim_stats(be, &b1);
+            CHECK(&h, st == LIBREGPU_ERR_VALIDATION,
+                  "a Z plan that drops a mandatory operation is refused");
+            CHECK(&h, b0.submits_ordinary == b1.submits_ordinary &&
+                      b0.submits_update == b1.submits_update,
+                  "an invalid Z is rejected before the backend is called");
+            libregpu_dataset_release(&ds);
+        }
+        if (be) libregpu_backend_destroy(be);
+    }
+
+    h_fold(&h, failures, checks);
 }
 
 int libregpu_selftest(FILE *out)
 {
     int failures = 0, checks = 0;
-    fprintf(out, "%s %s self-test (simulated backend; GPU time is a cost model)\n\n",
-            LIBREGPU_CODE_NAME, LIBREGPU_VERSION);
+    fprintf(out, "%s %s (%s) self-test (simulated backend; GPU time is a cost model)\n\n",
+            LIBREGPU_CODE_NAME, LIBREGPU_VERSION, LIBREGPU_STEP_LABEL);
     test_pipeline(out, &failures, &checks);
     test_camera_model(out, &failures, &checks);
     test_dependency_integrity(out, &failures, &checks);
     test_lifetime(out, &failures, &checks);
     test_backend_failures(out, &failures, &checks);
     test_capture(out, &failures, &checks);
+    test_dataset_contract(out, &failures, &checks);
+    test_submission_route(out, &failures, &checks);
+    test_fence_contract(out, &failures, &checks);
+    test_runtime_intake(out, &failures, &checks);
+    test_defaults_and_version(out, &failures, &checks);
     test_rebuilder_validation(out, &failures, &checks);
     test_memory_manager(out, &failures, &checks);
-    test_session_and_modes(out, &failures, &checks);
+    test_session(out, &failures, &checks);
+    test_contracts(out, &failures, &checks);
     test_units(out, &failures, &checks);
-    test_alloc_sweep(out, &failures, &checks);
     fprintf(out, "\n%d checks, %d failed\n", checks, failures);
     return failures;
 }

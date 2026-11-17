@@ -59,6 +59,7 @@
 
 
 
+
 #ifndef LIBREGPU_LIB_H
 #define LIBREGPU_LIB_H
 
@@ -68,9 +69,9 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#define LIBREGPU_CODE_NAME         "LibreGPU-rc0"
-#define LIBREGPU_VERSION           "rc0"
-#define LIBREGPU_BASE_VERSION      "1.0.0"     
+#define LIBREGPU_CODE_NAME         "LibreGPU-rc1"
+#define LIBREGPU_VERSION           "rc1"
+#define LIBREGPU_STEP_LABEL        "Step 2"     
 #define LIBREGPU_NO_INDEX          UINT32_MAX
 #define LIBREGPU_MAX_OP_RES        4            
 #define LIBREGPU_MAX_REGIONS       4            
@@ -102,21 +103,6 @@ typedef enum {
 } LibreGPUStatus;
 
 const char *libregpu_status_str(LibreGPUStatus s);
-
-
-
-
-void *libregpu_malloc(size_t n);
-void *libregpu_calloc(size_t count, size_t size);
-void *libregpu_realloc(void *p, size_t n);
-
-
-
-
-void libregpu_alloc_fault_arm(long fail_index);
-void libregpu_alloc_fault_pause(bool paused);   
-void libregpu_alloc_fault_disarm(void);
-long libregpu_alloc_count(void);
 
 
 
@@ -194,17 +180,12 @@ static inline LibreGPURect libregpu_rect_translate(LibreGPURect r, int32_t dx, i
 
 
 
-typedef enum {
-    LIBREGPU_MODE_OBSERVE,   
-    LIBREGPU_MODE_COMPARE,   
-    LIBREGPU_MODE_OPTIMIZE   
-} LibreGPUMode;
+
 
 typedef struct {
-    LibreGPUMode mode;
     double    target_loops_per_second;       
     bool      enable_micro_pixel;
-    bool      enable_camera;
+    bool      enable_camera;                 
     float     camera_max_reuse_angle;        
     float     camera_position_epsilon;       
     float     camera_roll_epsilon;
@@ -215,9 +196,6 @@ typedef struct {
     uint32_t  baseline_sample_interval;      
 
     uint32_t  full_refresh_interval;         
-    uint64_t  vram_budget_bytes;             
-
-
 } LibreGPUConfig;
 
 void        libregpu_config_defaults(LibreGPUConfig *cfg);
@@ -287,6 +265,53 @@ typedef struct {
     LibreGPUProjection projection;
 } LibreGPUCameraPose;
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 typedef struct {
     LibreGPUOpKind     kind;
     uint32_t        flags;
@@ -306,15 +331,16 @@ typedef struct {
     size_t          blob_size;
 } LibreGPURawOp;
 
-
-
 typedef struct {
-    uint64_t    sequence;
+    uint64_t    sequence;                      
     uint64_t    timestamp_ns;                  
     LibreGPURawOp *ops;
     size_t      op_count, op_capacity;
     bool        complete;                      
+    bool        forwarded;                     
+
     bool        corrupt;                       
+
 
 } LibreGPURawDataset;
 
@@ -332,12 +358,30 @@ LibreGPUStatus libregpu_dataset_append(LibreGPURawDataset *ds, const LibreGPURaw
 
 
 
-typedef struct { LibreGPURawDataset current; uint64_t next_sequence; } LibreGPUCapture;
+
+
+
+
+
+
+typedef LibreGPUStatus (*LibreGPUForwardFn)(void *ctx, const LibreGPURawOp *op);
+
+typedef struct {
+    LibreGPURawDataset current;
+    uint64_t        next_sequence;
+    LibreGPUForwardFn  forward;
+    void           *forward_ctx;
+    bool            passing_through;           
+} LibreGPUCapture;
+
+
 
 void        libregpu_capture_init(LibreGPUCapture *c);
+void        libregpu_capture_init_forward(LibreGPUCapture *c, LibreGPUForwardFn forward, void *forward_ctx);
 void        libregpu_capture_shutdown(LibreGPUCapture *c);
 LibreGPUStatus libregpu_capture_feed(LibreGPUCapture *c, const LibreGPURawOp *op,
                                LibreGPURawDataset *out , bool *ready);
+LibreGPUStatus libregpu_capture_report_uncapturable(LibreGPUCapture *c);
 
 
 
@@ -357,9 +401,7 @@ typedef struct {
 
 
 
-
-
-typedef enum { GIR_DEP_RAW, GIR_DEP_WAW, GIR_DEP_WAR } GirDepKind;
+typedef enum { GIR_DEP_RAW, GIR_DEP_WAW } GirDepKind;
 
 typedef struct {                       
     uint32_t        from, to;
@@ -369,10 +411,7 @@ typedef struct {
 
 typedef struct {                       
     LibreGPUResourceId id;
-    uint32_t first_use, last_use;
     uint32_t first_writer, last_writer;   
-    uint32_t read_count, write_count;
-    bool     is_present_target;
 } GirResource;
 
 typedef struct {
@@ -381,7 +420,6 @@ typedef struct {
     GirDep      *deps;      size_t dep_count;
     GirResource *resources; size_t resource_count;
     uint32_t    *res_table; size_t res_table_mask;   
-    uint64_t     whole_hash;
     size_t       opaque_count;
     size_t       camera_count;                       
     bool         has_present_target;  LibreGPUResourceId present_target;
@@ -412,6 +450,20 @@ void              gir_release(GirDataset *g);
 const GirResource *gir_find_resource(const GirDataset *g, LibreGPUResourceId id);
 LibreGPUStatus       gir_compare(const GirDataset *x, const GirDataset *y, GirDelta *out);
 void              gir_delta_release(GirDelta *d);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -459,17 +511,23 @@ typedef struct {
     LibreGPUStreamAction action;
     double            record_changes_per_second;   
 
-    double            changes_per_second;          
-
     uint64_t          dirty_pixels;                
 
     LibreGPUZPlan        plan;
 } LibreGPUStreamlineResult;
 
 typedef struct {                       
-    bool supports_retained_results;    
+    
+
+
+    bool supports_retained_results;
+    
+
     bool supports_scissor_replay;
+    
+
     bool supports_reproject;
+    
     bool supports_gpu_timing;
 } LibreGPUBackendCaps;
 
@@ -478,6 +536,28 @@ LibreGPUStatus streamline_decide(const LibreGPUConfig *cfg, const LibreGPUBacken
                               double dt_seconds, LibreGPUStreamlineResult *out);
 void        streamline_force_ordinary(LibreGPUStreamlineResult *r, const char *reason);
 void        streamline_result_release(LibreGPUStreamlineResult *r);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -561,44 +641,50 @@ void        libregpu_backend_destroy(LibreGPUBackend *be);
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 typedef enum { LIBREGPU_OWNER_X, LIBREGPU_OWNER_Y, LIBREGPU_OWNER_Z, LIBREGPU_OWNER_COUNT } LibreGPURefOwner;
 
 typedef struct LibreGPUMemRes LibreGPUMemRes;
 
 typedef struct {
-    uint64_t bytes_tracked,  bytes_tracked_peak;   
-    uint64_t libregpu_bytes,    libregpu_bytes_peak;     
-    uint64_t bytes_in_use,   bytes_peak;           
-
-    uint64_t bytes_pooled;
-    size_t   resources_tracked, resources_pooled;
+    uint64_t bytes_tracked, bytes_tracked_peak;   
+    size_t   resources_tracked;
     uint64_t reclaimed_count, reclaimed_bytes;
-    uint64_t deferred_count;        
-    uint64_t pool_reuse_count;
-    uint64_t destroy_failures;      
-    uint64_t forced_sync_releases;  
-    uint64_t tracking_failures;
+    uint64_t destroy_failures;                    
 } LibreGPUMemStats;
 
 typedef struct {
     const LibreGPUBackend *backend;
     LibreGPUMemRes       **buckets;  size_t bucket_count, live_count;
-    LibreGPUMemRes        *pool;     size_t pool_count;
-    uint64_t            vram_budget;
     uint32_t            next_scratch_id;
     LibreGPUMemStats       stats;
 } LibreGPUMemoryManager;
 
-LibreGPUStatus mem_init(LibreGPUMemoryManager *m, const LibreGPUBackend *be, uint64_t vram_budget);
-
-
-LibreGPUStatus mem_init_unlimited(LibreGPUMemoryManager *m, const LibreGPUBackend *be);
+LibreGPUStatus mem_init(LibreGPUMemoryManager *m, const LibreGPUBackend *be);
 void        mem_shutdown(LibreGPUMemoryManager *m);
 LibreGPUStatus mem_track(LibreGPUMemoryManager *m, LibreGPUResourceId id, uint64_t size, bool scratch);
 LibreGPUStatus mem_track_raw(LibreGPUMemoryManager *m, const LibreGPURawDataset *raw);
 
+
+bool        mem_creates_tracked_identity(const LibreGPUMemoryManager *m, const LibreGPURawDataset *raw);
+
+void        mem_reset_fences(LibreGPUMemoryManager *m);
+
 LibreGPUStatus mem_sync_owner_refs(LibreGPUMemoryManager *m, LibreGPURefOwner owner, const GirDataset *g);
-void        mem_note_submission(LibreGPUMemoryManager *m, const GirDataset *g, uint64_t fence);
 void        mem_note_raw_submission(LibreGPUMemoryManager *m, const LibreGPURawDataset *raw, uint64_t fence);
 void        mem_note_use(LibreGPUMemoryManager *m, LibreGPUResourceId id, uint64_t fence);
 LibreGPUStatus mem_request_release(LibreGPUMemoryManager *m, LibreGPUResourceId id);
@@ -650,14 +736,17 @@ double      gov_present_rate(const LibreGPUGovernor *g);
 typedef struct {
     uint64_t cycles, baseline_cycles, incremental_cycles, no_impact_cycles;
     uint64_t fallback_cycles;       
-    uint64_t failed_rebuilds, would_optimize_cycles;
-    uint64_t corrupt_datasets, bookkeeping_errors, baseline_losses;
+    uint64_t failed_rebuilds;
+    uint64_t forwarded_datasets,    
+             refused_datasets,      
+             corrupt_datasets,      
+             bookkeeping_errors, baseline_losses;
     uint64_t ops_total, ops_submitted, dirty_pixels_total;
     uint64_t cpu_ns_total, cpu_ns_max;
     uint64_t gpu_ns_incremental, gpu_samples_incremental;
     uint64_t gpu_ns_ordinary,    gpu_samples_ordinary;
     uint64_t gpu_ns_baseline,    gpu_samples_baseline;   
-    uint64_t vram_sum, vram_samples, vram_peak, libregpu_vram_peak;
+    uint64_t vram_sum, vram_samples, vram_peak;
     uint64_t lifetime_errors;
     uint64_t interval_count;  double interval_mean_ns, interval_m2;   
     uint64_t last_cycle_ns;
@@ -683,7 +772,7 @@ typedef struct {
     LibreGPUGovernor       gov;
     LibreGPUMetrics        metrics;
     uint64_t            cycle, last_dataset_ts_ns, last_fence;
-    uint64_t            last_dataset_ns;      
+    uint64_t            last_sequence;        
     bool                last_cycle_optimized;
     bool                last_cycle_z_built;   
     bool                processing_y;
@@ -702,6 +791,8 @@ typedef struct {
 
 typedef struct {
     bool              had_dataset, was_baseline, session_invalid;
+    bool              submitted;               
+    bool              forwarded;               
     LibreGPUStreamAction decision;                
     LibreGPUZMode        submitted_mode;          
     bool              fell_back_after_failure;
@@ -710,7 +801,6 @@ typedef struct {
     const char       *micro_reason, *camera_reason;   
     size_t            ops_total, ops_submitted, changes;
     double            record_changes_per_second;
-    double            changes_per_second;      
     uint64_t          dirty_pixels;
     uint64_t          gpu_ns, cpu_ns;
 } LibreGPUCycleInfo;
@@ -725,55 +815,6 @@ LibreGPUStatus libregpu_runtime_run(LibreGPURuntime *rt, volatile sig_atomic_t *
 void        libregpu_runtime_stop(LibreGPURuntime *rt);          
 void        libregpu_runtime_status(const LibreGPURuntime *rt, LibreGPURuntimeStatus *out);
 const char *libregpu_runtime_state_str(LibreGPURuntimeState s);
-
-
-
-
-
-
-
-
-
-#define SIM_W 64
-#define SIM_H 36
-#define SIM_TARGET_ID 1u
-#define SIM_SHADOW_ID 2u
-#define SIM_TEXTURE_ID 3u
-#define SIM_MAX_OBJECTS 8
-
-typedef struct { int32_t x, y, w, h; uint32_t color; } SimObject;   
-
-typedef struct {
-    bool      camera_enabled;
-    int32_t   cam_yaw_px, cam_pitch_px;     
-    float     cam_yaw_sub_px;               
-
-    LibreGPUProjection projection;             
-    SimObject objects[SIM_MAX_OBJECTS];     size_t object_count;
-    bool      shadow_pass;  uint32_t shadow_param;
-    bool      shadow_overwrite;             
-    uint32_t  transient_id;                 
-    bool      inject_opaque;
-} SimScene;
-
-typedef struct {                            
-    uint32_t    skip;                       
-    uint32_t    count;                      
-    LibreGPUStatus status;                     
-} SimSubmitFault;
-
-LibreGPUBackend  *libregpu_sim_backend_create(uint32_t fence_latency);
-void           libregpu_sim_backend_destroy(LibreGPUBackend *be);
-LibreGPUStatus    libregpu_sim_enqueue(LibreGPUBackend *be, LibreGPURawDataset *ds);   
-void           libregpu_sim_set_session_valid(LibreGPUBackend *be, bool valid);
-const uint32_t *libregpu_sim_display(const LibreGPUBackend *be);
-uint64_t       libregpu_sim_destroyed_count(const LibreGPUBackend *be);
-void           libregpu_sim_inject_submit_fault(LibreGPUBackend *be, SimSubmitFault f);
-void           libregpu_sim_inject_destroy_faults(LibreGPUBackend *be, uint32_t count);
-void           libregpu_sim_scene_defaults(SimScene *s);
-LibreGPUStatus    libregpu_sim_build_dataset(const SimScene *s, LibreGPURawDataset *out);
-LibreGPUStatus    libregpu_sim_render_reference(const LibreGPURawDataset *ds, uint32_t *fb_out);
-LibreGPUStatus    libregpu_sim_demo_scenario(LibreGPUBackend *be, size_t frames);
 
 #endif 
 
@@ -817,44 +858,19 @@ LibreGPUStatus    libregpu_sim_demo_scenario(LibreGPUBackend *be, size_t frames)
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 struct LibreGPUMemRes {
     LibreGPUResourceId id;
     uint64_t        size;
     uint8_t         refmask;            
     bool            scratch;            
     bool            release_requested;
-    bool            deferred_counted;
     uint64_t        last_use_fence;
     LibreGPUMemRes    *next;               
 };
 
-#define POOL_MAX 8u
-
 static bool mm_ready(const LibreGPUMemoryManager *m)
 {
     return m && m->buckets && m->backend;
-}
-
-static uint64_t mm_completed_fence(const LibreGPUMemoryManager *m)
-{
-    
-
-    return m->backend->completed_fence ? m->backend->completed_fence(m->backend->ctx) : 0;
 }
 
 static size_t bucket_index(const LibreGPUMemoryManager *m, LibreGPUResourceId id)
@@ -872,7 +888,7 @@ static LibreGPUMemRes *find_node(const LibreGPUMemoryManager *m, LibreGPUResourc
 static LibreGPUStatus grow_table(LibreGPUMemoryManager *m)
 {
     const size_t nb = m->bucket_count * 2;
-    LibreGPUMemRes **nt = (LibreGPUMemRes **)libregpu_calloc(nb, sizeof *nt);
+    LibreGPUMemRes **nt = (LibreGPUMemRes **)calloc(nb, sizeof *nt);
     if (!nt) return LIBREGPU_ERR_NO_MEMORY;
     LibreGPUMemRes **old = m->buckets;
     const size_t ob = m->bucket_count;
@@ -898,65 +914,29 @@ static void link_node(LibreGPUMemoryManager *m, LibreGPUMemRes *n)
     m->live_count++;
 }
 
-
-static void acct_add(LibreGPUMemoryManager *m, uint64_t bytes, bool scratch)
+static void account_add(LibreGPUMemoryManager *m, uint64_t bytes)
 {
     LibreGPUMemStats *s = &m->stats;
     s->bytes_tracked = libregpu_sat_add_u64(s->bytes_tracked, bytes);
     if (s->bytes_tracked > s->bytes_tracked_peak) s->bytes_tracked_peak = s->bytes_tracked;
-    s->bytes_in_use = s->bytes_tracked;             
-    s->bytes_peak = s->bytes_tracked_peak;
-    if (scratch) {
-        s->libregpu_bytes = libregpu_sat_add_u64(s->libregpu_bytes, bytes);
-        if (s->libregpu_bytes > s->libregpu_bytes_peak) s->libregpu_bytes_peak = s->libregpu_bytes;
-    }
 }
 
-static void acct_sub(LibreGPUMemoryManager *m, uint64_t bytes, bool scratch)
+static void account_sub(LibreGPUMemoryManager *m, uint64_t bytes)
 {
-    LibreGPUMemStats *s = &m->stats;
-    s->bytes_tracked = bytes > s->bytes_tracked ? 0 : s->bytes_tracked - bytes;
-    s->bytes_in_use = s->bytes_tracked;             
-    if (scratch) s->libregpu_bytes = bytes > s->libregpu_bytes ? 0 : s->libregpu_bytes - bytes;
+    m->stats.bytes_tracked = bytes > m->stats.bytes_tracked ? 0 : m->stats.bytes_tracked - bytes;
 }
 
-
-static bool backend_destroy(LibreGPUMemoryManager *m, const LibreGPUMemRes *n)
-{
-    if (!m->backend->destroy_resource ||
-        m->backend->destroy_resource(m->backend->ctx, n->id) != LIBREGPU_OK) {
-        m->stats.destroy_failures++;
-        return false;
-    }
-    return true;
-}
-
-static void retire_node(LibreGPUMemoryManager *m, LibreGPUMemRes *n)      
-{
-    acct_sub(m, n->size, n->scratch);
-    m->stats.reclaimed_count++;
-    m->stats.reclaimed_bytes = libregpu_sat_add_u64(m->stats.reclaimed_bytes, n->size);
-    free(n);
-}
-
-
-LibreGPUStatus mem_init(LibreGPUMemoryManager *m, const LibreGPUBackend *be, uint64_t vram_budget)
+LibreGPUStatus mem_init(LibreGPUMemoryManager *m, const LibreGPUBackend *be)
 {
     if (!m) return LIBREGPU_ERR_INVALID_ARG;
     memset(m, 0, sizeof *m);
     LibreGPUStatus st = libregpu_backend_validate(be);        
     if (st != LIBREGPU_OK) return st;
     m->backend = be;
-    m->vram_budget = vram_budget;
     m->next_scratch_id = LIBREGPU_SCRATCH_ID_BASE;
     m->bucket_count = 256;
-    m->buckets = (LibreGPUMemRes **)libregpu_calloc(m->bucket_count, sizeof *m->buckets);
+    m->buckets = (LibreGPUMemRes **)calloc(m->bucket_count, sizeof *m->buckets);
     return m->buckets ? LIBREGPU_OK : LIBREGPU_ERR_NO_MEMORY;
-}
-
-LibreGPUStatus mem_init_unlimited(LibreGPUMemoryManager *m, const LibreGPUBackend *be)
-{
-    return mem_init(m, be, 0);                  
 }
 
 LibreGPUStatus mem_track(LibreGPUMemoryManager *m, LibreGPUResourceId id, uint64_t size, bool scratch)
@@ -967,23 +947,41 @@ LibreGPUStatus mem_track(LibreGPUMemoryManager *m, LibreGPUResourceId id, uint64
     LibreGPUMemRes *n = find_node(m, id);
     if (n) {                                          
         if (n->scratch != scratch) return LIBREGPU_ERR_INVALID_ARG;
-        if (size > n->size) { acct_add(m, size - n->size, n->scratch); n->size = size; }
+        if (size > n->size) { account_add(m, size - n->size); n->size = size; }
         return LIBREGPU_OK;
     }
     if (m->live_count * 4 > m->bucket_count * 3) {
         LibreGPUStatus st = grow_table(m);
-        if (st != LIBREGPU_OK) { m->stats.tracking_failures++; return st; }
+        if (st != LIBREGPU_OK) return st;
     }
-    n = (LibreGPUMemRes *)libregpu_calloc(1, sizeof *n);
-    if (!n) { m->stats.tracking_failures++; return LIBREGPU_ERR_NO_MEMORY; }
+    n = (LibreGPUMemRes *)calloc(1, sizeof *n);
+    if (!n) return LIBREGPU_ERR_NO_MEMORY;
     n->id = id;
     n->size = size;
     n->scratch = scratch;
     link_node(m, n);
-    acct_add(m, size, scratch);
+    account_add(m, size);
     return LIBREGPU_OK;
 }
 
+bool mem_creates_tracked_identity(const LibreGPUMemoryManager *m, const LibreGPURawDataset *raw)
+{
+    if (!mm_ready(m) || !raw) return false;
+    for (size_t i = 0; i < raw->op_count; i++) {
+        const LibreGPURawOp *op = &raw->ops[i];
+        if (op->kind != LIBREGPU_OP_RES_CREATE) continue;
+        for (uint8_t k = 0; k < op->write_count; k++)
+            if (find_node(m, op->writes[k])) return true;
+    }
+    return false;
+}
+
+void mem_reset_fences(LibreGPUMemoryManager *m)
+{
+    if (!mm_ready(m)) return;
+    for (size_t b = 0; b < m->bucket_count; b++)
+        for (LibreGPUMemRes *n = m->buckets[b]; n; n = n->next) n->last_use_fence = 0;
+}
 
 
 
@@ -1038,12 +1036,6 @@ void mem_note_use(LibreGPUMemoryManager *m, LibreGPUResourceId id, uint64_t fenc
     if (n && fence > n->last_use_fence) n->last_use_fence = fence;
 }
 
-void mem_note_submission(LibreGPUMemoryManager *m, const GirDataset *g, uint64_t fence)
-{
-    if (!mm_ready(m) || !g) return;
-    for (size_t i = 0; i < g->resource_count; i++) mem_note_use(m, g->resources[i].id, fence);
-}
-
 
 
 void mem_note_raw_submission(LibreGPUMemoryManager *m, const LibreGPURawDataset *raw, uint64_t fence)
@@ -1059,54 +1051,21 @@ void mem_note_raw_submission(LibreGPUMemoryManager *m, const LibreGPURawDataset 
 LibreGPUStatus mem_request_release(LibreGPUMemoryManager *m, LibreGPUResourceId id)
 {
     if (!mm_ready(m)) return LIBREGPU_ERR_INVALID_ARG;
-    if (id.id >= LIBREGPU_SCRATCH_ID_BASE) {               
-        LibreGPUMemRes *s = find_node(m, id);
-        if (!s) return LIBREGPU_ERR_INVALID_ARG;
-    }
     LibreGPUMemRes *n = find_node(m, id);
     if (!n) {
+        if (id.id >= LIBREGPU_SCRATCH_ID_BASE) return LIBREGPU_ERR_INVALID_ARG;    
         LibreGPUStatus st = mem_track(m, id, 0, false);
-        if (st != LIBREGPU_OK) {
-            
-
-            if (st == LIBREGPU_ERR_NO_MEMORY && m->backend->wait_idle && m->backend->destroy_resource) {
-                m->backend->wait_idle(m->backend->ctx);
-                st = m->backend->destroy_resource(m->backend->ctx, id);
-                if (st == LIBREGPU_OK) { m->stats.forced_sync_releases++; return LIBREGPU_OK; }
-                m->stats.destroy_failures++;
-            }
-            return st;
-        }
+        if (st != LIBREGPU_OK) return st;                  
         n = find_node(m, id);
     }
     n->release_requested = true;
-    if ((n->refmask != 0 || n->last_use_fence > mm_completed_fence(m)) && !n->deferred_counted) {
-        n->deferred_counted = true;
-        m->stats.deferred_count++;                      
-    }
     return LIBREGPU_OK;
-}
-
-static void drain_pool(LibreGPUMemoryManager *m, uint64_t completed, bool everything)
-{
-    LibreGPUMemRes **pp = &m->pool;
-    while (*pp) {
-        LibreGPUMemRes *n = *pp;
-        if ((everything || n->last_use_fence <= completed) && backend_destroy(m, n)) {
-            *pp = n->next;
-            m->pool_count--;
-            m->stats.bytes_pooled = n->size > m->stats.bytes_pooled ? 0 : m->stats.bytes_pooled - n->size;
-            retire_node(m, n);
-        } else {
-            pp = &n->next;                              
-        }
-    }
 }
 
 size_t mem_collect(LibreGPUMemoryManager *m)
 {
     if (!mm_ready(m)) return 0;
-    const uint64_t done = mm_completed_fence(m);
+    const uint64_t done = m->backend->completed_fence(m->backend->ctx);
     size_t released = 0;
 
     for (size_t b = 0; b < m->bucket_count; b++) {
@@ -1117,59 +1076,29 @@ size_t mem_collect(LibreGPUMemoryManager *m)
                 pp = &n->next;
                 continue;
             }
-            const bool pressure = m->vram_budget && m->stats.libregpu_bytes > m->vram_budget;
-            if (n->scratch && !pressure && m->pool_count < POOL_MAX) {
-                *pp = n->next;                          
-                m->live_count--;
-                n->release_requested = false;
-                n->deferred_counted = false;
-                n->next = m->pool;
-                m->pool = n;
-                m->pool_count++;
-                m->stats.bytes_pooled = libregpu_sat_add_u64(m->stats.bytes_pooled, n->size);
-                released++;
-            } else if (backend_destroy(m, n)) {
-                *pp = n->next;
-                m->live_count--;
-                retire_node(m, n);
-                released++;
-            } else {
-                pp = &n->next;                          
+            if (m->backend->destroy_resource(m->backend->ctx, n->id) != LIBREGPU_OK) {
+                m->stats.destroy_failures++;            
+                pp = &n->next;
+                continue;
             }
+            *pp = n->next;
+            m->live_count--;
+            account_sub(m, n->size);
+            m->stats.reclaimed_count++;
+            m->stats.reclaimed_bytes = libregpu_sat_add_u64(m->stats.reclaimed_bytes, n->size);
+            free(n);
+            released++;
         }
     }
-    if (m->vram_budget && m->stats.libregpu_bytes > m->vram_budget) drain_pool(m, done, false);
     return released;
 }
+
 
 LibreGPUStatus mem_acquire_scratch(LibreGPUMemoryManager *m, uint64_t bytes, LibreGPUResourceId *out)
 {
     if (!mm_ready(m) || !out || bytes == 0) return LIBREGPU_ERR_INVALID_ARG;
-    const uint64_t done = mm_completed_fence(m);
-    const uint64_t max_reuse = bytes > UINT64_MAX / 2 ? UINT64_MAX : bytes * 2;
-
-    for (LibreGPUMemRes **pp = &m->pool; *pp; pp = &(*pp)->next) {         
-        LibreGPUMemRes *n = *pp;
-        if (n->size >= bytes && n->size <= max_reuse && n->last_use_fence <= done) {
-            *pp = n->next;
-            m->pool_count--;
-            m->stats.bytes_pooled = n->size > m->stats.bytes_pooled ? 0 : m->stats.bytes_pooled - n->size;
-            m->stats.pool_reuse_count++;
-            n->refmask = 0;
-            n->release_requested = false;
-            link_node(m, n);
-            *out = n->id;
-            return LIBREGPU_OK;
-        }
-    }
-
-    if (m->vram_budget && libregpu_sat_add_u64(m->stats.libregpu_bytes, bytes) > m->vram_budget)
-        drain_pool(m, done, false);
-    if (m->vram_budget && libregpu_sat_add_u64(m->stats.libregpu_bytes, bytes) > m->vram_budget)
-        return LIBREGPU_ERR_NO_MEMORY;                    
-
     if (!m->backend->create_scratch) return LIBREGPU_ERR_UNSUPPORTED;
-    if (m->next_scratch_id == UINT32_MAX) return LIBREGPU_ERR_NO_MEMORY;   
+    if (m->next_scratch_id == UINT32_MAX) return LIBREGPU_ERR_NO_MEMORY;       
     LibreGPUResourceId id = { m->next_scratch_id++, 1 };
     LibreGPUStatus st = m->backend->create_scratch(m->backend->ctx, id, bytes);
     if (st != LIBREGPU_OK) return st;
@@ -1187,27 +1116,18 @@ void mem_get_stats(const LibreGPUMemoryManager *m, LibreGPUMemStats *out)
     if (!m || !out) return;
     *out = m->stats;
     out->resources_tracked = m->live_count;
-    out->resources_pooled = m->pool_count;
-    out->bytes_in_use = out->bytes_tracked;         
-    out->bytes_peak = out->bytes_tracked_peak;
 }
 
 void mem_shutdown(LibreGPUMemoryManager *m)
 {
     if (!m || !m->buckets) return;
     if (m->backend && m->backend->wait_idle) m->backend->wait_idle(m->backend->ctx);
-
-    drain_pool(m, UINT64_MAX, true);
-    LibreGPUMemRes *pn = m->pool;                          
-    while (pn) { LibreGPUMemRes *nx = pn->next; free(pn); pn = nx; }
-    m->pool = NULL;
-    m->pool_count = 0;
-
     for (size_t b = 0; b < m->bucket_count; b++) {
         LibreGPUMemRes *n = m->buckets[b];
         while (n) {
             LibreGPUMemRes *nx = n->next;
-            if (n->scratch || n->release_requested) (void)backend_destroy(m, n);   
+            if (n->scratch || n->release_requested)     
+                if (m->backend->destroy_resource(m->backend->ctx, n->id) != LIBREGPU_OK) m->stats.destroy_failures++;
             free(n);                                    
             n = nx;
         }
@@ -1291,8 +1211,8 @@ const char *libregpu_stream_action_str(LibreGPUStreamAction a)
 static bool partial_init(Partial *p, size_t n)
 {
     memset(p, 0, sizeof *p);
-    p->in_set    = (uint8_t *)libregpu_calloc(n ? n : 1, 1);
-    p->scissored = (uint8_t *)libregpu_calloc(n ? n : 1, 1);
+    p->in_set    = (uint8_t *)calloc(n ? n : 1, 1);
+    p->scissored = (uint8_t *)calloc(n ? n : 1, 1);
     return p->in_set && p->scissored;
 }
 
@@ -1454,24 +1374,10 @@ static void eval_camera(const LibreGPUConfig *cfg, const LibreGPUBackendCaps *ca
     
 
     int32_t hx0 = 0, hx1 = W;
-    if (sx < 0) {
-        const int32_t edge = (int32_t)((int64_t)W + sx - m);
-        p->regions[p->region_count++] = libregpu_rect_make(edge, 0, W, H);
-        hx1 = edge;
-    }
-    if (sx > 0) {
-        const int32_t edge = (int32_t)((int64_t)sx + m);
-        p->regions[p->region_count++] = libregpu_rect_make(0, 0, edge, H);
-        hx0 = edge;
-    }
-    if (sy > 0) {
-        const int32_t edge = (int32_t)((int64_t)sy + m);
-        p->regions[p->region_count++] = libregpu_rect_make(hx0, 0, hx1, edge);
-    }
-    if (sy < 0) {
-        const int32_t edge = (int32_t)((int64_t)H + sy - m);
-        p->regions[p->region_count++] = libregpu_rect_make(hx0, edge, hx1, H);
-    }
+    if (sx < 0) { p->regions[p->region_count++] = libregpu_rect_make(W + sx - m, 0, W, H); hx1 = W + sx - m; }
+    if (sx > 0) { p->regions[p->region_count++] = libregpu_rect_make(0, 0, sx + m, H);     hx0 = sx + m; }
+    if (sy > 0) p->regions[p->region_count++] = libregpu_rect_make(hx0, 0, hx1, sy + m);
+    if (sy < 0) p->regions[p->region_count++] = libregpu_rect_make(hx0, H + sy - m, hx1, H);
     p->reproject = true;
     p->ok = true;
 #undef CAM_FAIL
@@ -1485,8 +1391,8 @@ static void eval_micro(const LibreGPUConfig *cfg, const GirDataset *x, const Gir
                        int32_t shift_x, int32_t shift_y, Partial *p)
 {
     const size_t ny = y->record_count;
-    uint8_t *affected = (uint8_t *)libregpu_calloc(ny ? ny : 1, 1);
-    uint8_t *resflag  = (uint8_t *)libregpu_calloc(y->resource_count ? y->resource_count : 1, 1);
+    uint8_t *affected = (uint8_t *)calloc(ny ? ny : 1, 1);
+    uint8_t *resflag  = (uint8_t *)calloc(y->resource_count ? y->resource_count : 1, 1);
     LibreGPURect R = { 0, 0, 0, 0 };
     const int32_t margin = (shift_x != 0 || shift_y != 0) ? cfg->exposed_margin_px : 0;
     const GirResource *tres = NULL;
@@ -1536,7 +1442,6 @@ static void eval_micro(const LibreGPUConfig *cfg, const GirDataset *x, const Gir
 
     for (size_t k = 0; k < y->dep_count; k++) {
         const GirDep *e = &y->deps[k];
-        if (e->kind == GIR_DEP_WAR) continue;
         if (affected[e->from] && !affected[e->to] && !is_target(y, e->res)) affected[e->to] = 1;
     }
 
@@ -1624,7 +1529,7 @@ static LibreGPUStatus build_plan(const GirDataset *y, const uint8_t *in_set, con
         if (k == LIBREGPU_OP_RES_DESTROY) continue;             
         if (is_mandatory_kind(k) || (in_set && in_set[i])) n++;
     }
-    LibreGPUReplayOp *ops = (LibreGPUReplayOp *)libregpu_calloc(n ? n : 1, sizeof *ops);
+    LibreGPUReplayOp *ops = (LibreGPUReplayOp *)calloc(n ? n : 1, sizeof *ops);
     if (!ops) return LIBREGPU_ERR_NO_MEMORY;
     size_t w = 0;
     for (size_t i = 0; i < y->record_count; i++) {
@@ -1688,7 +1593,6 @@ LibreGPUStatus streamline_decide(const LibreGPUConfig *cfg, const LibreGPUBacken
 
     if (!x || !y || !d || !x->valid || !y->valid) { out->fallback_reason = "representation invalid"; return LIBREGPU_OK; }
     out->record_changes_per_second = dt_seconds > 0.0 ? (double)d->change_count / dt_seconds : 0.0;
-    out->changes_per_second = out->record_changes_per_second;   
 
     if (x->opaque_count || y->opaque_count) { out->fallback_reason = "opaque operations present"; return LIBREGPU_OK; }
     if (!caps->supports_retained_results)  { out->fallback_reason = "backend cannot retain results"; return LIBREGPU_OK; }
@@ -1729,8 +1633,8 @@ LibreGPUStatus streamline_decide(const LibreGPUConfig *cfg, const LibreGPUBacken
         
 
         bool compatible = true;
-        uint8_t *in_set = (uint8_t *)libregpu_calloc(y->record_count ? y->record_count : 1, 1);
-        uint8_t *scis   = (uint8_t *)libregpu_calloc(y->record_count ? y->record_count : 1, 1);
+        uint8_t *in_set = (uint8_t *)calloc(y->record_count ? y->record_count : 1, 1);
+        uint8_t *scis   = (uint8_t *)calloc(y->record_count ? y->record_count : 1, 1);
         if (!in_set || !scis) { free(in_set); free(scis); partial_free(&m); partial_free(&c);
                                 set_ordinary(out, "out of memory"); return LIBREGPU_ERR_NO_MEMORY; }
         for (size_t i = 0; i < y->record_count; i++) {
@@ -1813,7 +1717,7 @@ LibreGPUStatus streamline_decide(const LibreGPUConfig *cfg, const LibreGPUBacken
 
 static LibreGPUStatus validate_dataset(const LibreGPURawDataset *y)
 {
-    if (!y->complete || y->corrupt) return LIBREGPU_ERR_VALIDATION;
+    if (!y->complete || y->forwarded || y->corrupt) return LIBREGPU_ERR_VALIDATION;
     if (y->op_count > 0 && y->ops == NULL) return LIBREGPU_ERR_VALIDATION;
     if (y->op_count > LIBREGPU_MAX_DATASET_OPS) return LIBREGPU_ERR_VALIDATION;
     return LIBREGPU_OK;
@@ -1931,6 +1835,8 @@ LibreGPUStatus dataset_rebuilder_execute(const LibreGPUZPlan *plan, const LibreG
 
 
 
+
+
 const char *libregpu_status_str(LibreGPUStatus s)
 {
     switch (s) {
@@ -2002,7 +1908,7 @@ LibreGPUStatus libregpu_dataset_append(LibreGPURawDataset *ds, const LibreGPURaw
     if (ds->op_count == ds->op_capacity) {
         size_t ncap = ds->op_capacity ? ds->op_capacity * 2 : 64;
         if (ncap > LIBREGPU_MAX_DATASET_OPS) ncap = LIBREGPU_MAX_DATASET_OPS;
-        LibreGPURawOp *n = (LibreGPURawOp *)libregpu_realloc(ds->ops, ncap * sizeof *n);
+        LibreGPURawOp *n = (LibreGPURawOp *)realloc(ds->ops, ncap * sizeof *n);
         if (!n) return LIBREGPU_ERR_NO_MEMORY;
         ds->ops = n;
         ds->op_capacity = ncap;
@@ -2013,7 +1919,7 @@ LibreGPUStatus libregpu_dataset_append(LibreGPURawDataset *ds, const LibreGPURaw
     dst->blob = NULL;
     dst->blob_size = 0;
     if (op->blob && op->blob_size) {
-        uint8_t *copy = (uint8_t *)libregpu_malloc(op->blob_size);
+        uint8_t *copy = (uint8_t *)malloc(op->blob_size);
         if (!copy) return LIBREGPU_ERR_NO_MEMORY;         
         memcpy(copy, op->blob, op->blob_size);
         dst->blob = copy;
@@ -2025,16 +1931,59 @@ LibreGPUStatus libregpu_dataset_append(LibreGPURawDataset *ds, const LibreGPURaw
     return LIBREGPU_OK;
 }
 
-void libregpu_capture_init(LibreGPUCapture *c)
+void libregpu_capture_init_forward(LibreGPUCapture *c, LibreGPUForwardFn forward, void *forward_ctx)
 {
     if (!c) return;
     memset(c, 0, sizeof *c);
-    c->next_sequence = 1;
+    c->next_sequence = 1;                      
+    c->forward = forward;
+    c->forward_ctx = forward_ctx;
+}
+
+
+
+void libregpu_capture_init(LibreGPUCapture *c)
+{
+    libregpu_capture_init_forward(c, NULL, NULL);
 }
 
 void libregpu_capture_shutdown(LibreGPUCapture *c)
 {
     if (c) libregpu_dataset_release(&c->current);
+}
+
+static LibreGPUStatus forward_op(LibreGPUCapture *c, const LibreGPURawOp *op)
+{
+    return c->forward ? c->forward(c->forward_ctx, op) : LIBREGPU_ERR_UNSUPPORTED;   
+}
+
+
+
+static LibreGPUStatus enter_pass_through(LibreGPUCapture *c)
+{
+    LibreGPUStatus first = LIBREGPU_OK;
+    if (c->passing_through) return first;
+    for (size_t i = 0; i < c->current.op_count; i++) {
+        LibreGPUStatus st = forward_op(c, &c->current.ops[i]);
+        if (st != LIBREGPU_OK && first == LIBREGPU_OK) first = st;
+    }
+    libregpu_dataset_release(&c->current);
+    c->passing_through = true;
+    return first;
+}
+
+
+
+static void emit_forwarded(LibreGPUCapture *c, LibreGPURawDataset *out)
+{
+    libregpu_dataset_init(out);
+    out->sequence     = c->next_sequence++;       
+    out->timestamp_ns = libregpu_now_ns();
+    out->complete     = false;
+    out->forwarded    = true;
+    out->corrupt      = true;                     
+    libregpu_dataset_init(&c->current);
+    c->passing_through = false;
 }
 
 LibreGPUStatus libregpu_capture_feed(LibreGPUCapture *c, const LibreGPURawOp *op,
@@ -2045,18 +1994,38 @@ LibreGPUStatus libregpu_capture_feed(LibreGPUCapture *c, const LibreGPURawOp *op
     if (out->ops || out->op_count || out->op_capacity)   
         return LIBREGPU_ERR_INVALID_ARG;
 
-    LibreGPUStatus st = libregpu_dataset_append(&c->current, op);
-    if (st != LIBREGPU_OK) c->current.corrupt = true;       
-
-    if (op->kind == LIBREGPU_OP_PRESENT) {                  
-        c->current.complete     = true;
-        c->current.sequence     = c->next_sequence++;
-        c->current.timestamp_ns = libregpu_now_ns();
-        *out = c->current;                               
-        libregpu_dataset_init(&c->current);                 
-        *ready = true;
+    if (c->passing_through) {                            
+        const LibreGPUStatus st = forward_op(c, op);
+        if (op->kind == LIBREGPU_OP_PRESENT) { emit_forwarded(c, out); *ready = true; }
+        return st;
     }
-    return st;
+
+    const LibreGPUStatus st = libregpu_dataset_append(&c->current, op);
+    if (st == LIBREGPU_OK) {
+        if (op->kind == LIBREGPU_OP_PRESENT) {              
+            c->current.complete     = true;
+            c->current.sequence     = c->next_sequence++;
+            c->current.timestamp_ns = libregpu_now_ns();    
+            *out = c->current;                           
+            libregpu_dataset_init(&c->current);
+            *ready = true;
+        }
+        return LIBREGPU_OK;
+    }
+
+    
+    const LibreGPUStatus flushed   = enter_pass_through(c);
+    const LibreGPUStatus forwarded = forward_op(c, op);
+    if (op->kind == LIBREGPU_OP_PRESENT) { emit_forwarded(c, out); *ready = true; }
+    if (flushed != LIBREGPU_OK) return flushed;             
+    if (forwarded != LIBREGPU_OK) return forwarded;
+    return st;                                           
+}
+
+LibreGPUStatus libregpu_capture_report_uncapturable(LibreGPUCapture *c)
+{
+    if (!c) return LIBREGPU_ERR_INVALID_ARG;
+    return enter_pass_through(c);
 }
 
 
@@ -2157,7 +2126,7 @@ static uint64_t record_signature(const GirRecord *r, uint64_t payload_hash, uint
     return h;
 }
 
-static GirResource *res_find_or_add(GirDataset *g, LibreGPUResourceId id, uint32_t seq)
+static GirResource *res_find_or_add(GirDataset *g, LibreGPUResourceId id)
 {
     const uint64_t key = libregpu_res_key(id);
     size_t slot = (size_t)libregpu_mix64(key) & g->res_table_mask;
@@ -2168,7 +2137,6 @@ static GirResource *res_find_or_add(GirDataset *g, LibreGPUResourceId id, uint32
             GirResource *r = &g->resources[idx];
             memset(r, 0, sizeof *r);
             r->id = id;
-            r->first_use = r->last_use = seq;
             r->first_writer = r->last_writer = LIBREGPU_NO_INDEX;
             g->res_table[slot] = idx;
             return r;
@@ -2211,43 +2179,35 @@ LibreGPUStatus gir_build(GirDataset *g, const LibreGPURawDataset *raw)
 {
     if (!g || !raw) return LIBREGPU_ERR_INVALID_ARG;
     memset(g, 0, sizeof *g);
-    if (!raw->complete || raw->corrupt) return LIBREGPU_ERR_VALIDATION;
+    if (!raw->complete || raw->forwarded || raw->corrupt) return LIBREGPU_ERR_VALIDATION;
 
     const size_t n = raw->op_count;
     if (n > LIBREGPU_MAX_DATASET_OPS || (n > 0 && raw->ops == NULL)) return LIBREGPU_ERR_VALIDATION;
 
-    size_t refs = 0, reads_total = 0;
+    size_t refs = 0;
     for (size_t i = 0; i < n; i++) {                      
         const LibreGPURawOp *op = &raw->ops[i];
         if (!op_is_valid(op)) return LIBREGPU_ERR_VALIDATION;
         refs += (size_t)op->read_count + op->write_count;   
-        reads_total += op->read_count;
     }
 
     size_t tcap = 16;
     while (tcap < refs * 2 + 2) tcap <<= 1;               
 
-    g->records   = (GirRecord *)libregpu_calloc(n ? n : 1, sizeof *g->records);
-    g->deps      = (GirDep *)libregpu_calloc(refs * 2 + 1, sizeof *g->deps);    
-    g->resources = (GirResource *)libregpu_calloc(refs ? refs : 1, sizeof *g->resources);
-    g->res_table = (uint32_t *)libregpu_malloc(tcap * sizeof *g->res_table);
-    uint32_t *rd_op   = (uint32_t *)libregpu_malloc((reads_total ? reads_total : 1) * sizeof *rd_op);
-    uint32_t *rd_next = (uint32_t *)libregpu_malloc((reads_total ? reads_total : 1) * sizeof *rd_next);
-    uint32_t *res_head = (uint32_t *)libregpu_malloc((refs ? refs : 1) * sizeof *res_head);
-    if (!g->records || !g->deps || !g->resources || !g->res_table || !rd_op || !rd_next || !res_head) {
-        free(rd_op); free(rd_next); free(res_head);
+    g->records   = (GirRecord *)calloc(n ? n : 1, sizeof *g->records);
+    g->deps      = (GirDep *)calloc(refs ? refs : 1, sizeof *g->deps);    
+    g->resources = (GirResource *)calloc(refs ? refs : 1, sizeof *g->resources);
+    g->res_table = (uint32_t *)malloc(tcap * sizeof *g->res_table);
+    if (!g->records || !g->deps || !g->resources || !g->res_table) {
         gir_release(g);
         return LIBREGPU_ERR_NO_MEMORY;
     }
     memset(g->res_table, 0xFF, tcap * sizeof *g->res_table);   
-    memset(res_head, 0xFF, (refs ? refs : 1) * sizeof *res_head);
     g->res_table_mask = tcap - 1;
     g->record_count   = n;
     g->dataset_sequence = raw->sequence;
     g->camera_record  = LIBREGPU_NO_INDEX;
 
-    uint64_t whole = libregpu_mix64((uint64_t)n);
-    uint32_t rd_used = 0;
     for (size_t i = 0; i < n; i++) {
         const LibreGPURawOp *op = &raw->ops[i];
         GirRecord *r = &g->records[i];
@@ -2271,35 +2231,20 @@ LibreGPUStatus gir_build(GirDataset *g, const LibreGPURawDataset *raw)
             if (g->camera_count++ == 0) g->camera_record = seq;
         }
         r->sig = record_signature(r, op->payload_hash, op->size_bytes);
-        whole = libregpu_hash_combine(whole, r->sig);
 
         for (uint8_t k = 0; k < r->read_count; k++) {
-            GirResource *res = res_find_or_add(g, r->reads[k], seq);
-            const uint32_t ri = (uint32_t)(res - g->resources);
+            GirResource *res = res_find_or_add(g, r->reads[k]);
             if (res->last_writer != LIBREGPU_NO_INDEX)
                 add_dep(g, GIR_DEP_RAW, res->last_writer, seq, r->reads[k]);
-            rd_op[rd_used] = seq;                          
-            rd_next[rd_used] = res_head[ri];
-            res_head[ri] = rd_used++;
-            res->read_count++;
-            res->last_use = seq;
         }
         for (uint8_t k = 0; k < r->write_count; k++) {
-            GirResource *res = res_find_or_add(g, r->writes[k], seq);
-            const uint32_t ri = (uint32_t)(res - g->resources);
+            GirResource *res = res_find_or_add(g, r->writes[k]);
             if (res->last_writer != LIBREGPU_NO_INDEX)
                 add_dep(g, GIR_DEP_WAW, res->last_writer, seq, r->writes[k]);
-            for (uint32_t p = res_head[ri]; p != LIBREGPU_NO_INDEX; p = rd_next[p])
-                if (rd_op[p] != seq) add_dep(g, GIR_DEP_WAR, rd_op[p], seq, r->writes[k]);
-            res_head[ri] = LIBREGPU_NO_INDEX;                  
             if (res->first_writer == LIBREGPU_NO_INDEX) res->first_writer = seq;
             res->last_writer = seq;
-            res->write_count++;
-            res->last_use = seq;
         }
     }
-    free(rd_op); free(rd_next); free(res_head);
-    g->whole_hash = whole;
 
     
     g->has_camera = (g->camera_count == 1);
@@ -2313,9 +2258,8 @@ LibreGPUStatus gir_build(GirDataset *g, const LibreGPURawDataset *raw)
         }
     }
     if (g->has_present_target) {
-        GirResource *t = (GirResource *)gir_find_resource(g, g->present_target);
+        const GirResource *t = gir_find_resource(g, g->present_target);
         if (t) {
-            t->is_present_target = true;
             
 
 
@@ -2369,7 +2313,7 @@ LibreGPUStatus gir_compare(const GirDataset *x, const GirDataset *y, GirDelta *d
     if (d->identical) return LIBREGPU_OK;
 
     const size_t cap = nx > ny ? nx : ny;
-    d->changes = (GirChange *)libregpu_calloc(cap ? cap : 1, sizeof *d->changes);
+    d->changes = (GirChange *)calloc(cap ? cap : 1, sizeof *d->changes);
     if (!d->changes) return LIBREGPU_ERR_NO_MEMORY;
 
     const size_t mx = nx - p - s, my = ny - p - s;
@@ -2466,7 +2410,7 @@ LibreGPUStatus gov_init(LibreGPUGovernor *g, double target_loops_per_second)
     if (!isfinite(interval) || interval > 1e18) return LIBREGPU_ERR_INVALID_ARG;
     g->enabled = true;
     g->target_hz = target_loops_per_second;
-    g->interval_ns = (uint64_t)interval;                                   
+    g->interval_ns = (uint64_t)interval;
     if (g->interval_ns == 0) g->interval_ns = 1;
     return LIBREGPU_OK;
 }

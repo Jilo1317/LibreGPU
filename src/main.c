@@ -22,7 +22,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+
+
+LibreGPUBackend *libregpu_sim_backend_create(uint32_t fence_latency);
+LibreGPUStatus   libregpu_sim_demo_scenario(LibreGPUBackend *be, size_t frames);
+
 static volatile sig_atomic_t g_stop = 0;
+
+int libregpu_gui_main(int argc, char **argv);
 
 static void on_signal(int sig)
 {
@@ -65,6 +72,17 @@ int main(int argc, char **argv)
     LibreGPULauncherSettings s;
     char err[200] = "";
 
+    for (int i = 1; i < argc; i++) {
+        if (argv[i] && !strcmp(argv[i], "--gui")) {
+            for (int j = i; j < argc - 1; j++) argv[j] = argv[j + 1];
+            return libregpu_gui_main(argc - 1, argv);
+        }
+        if (argv[i] && !strcmp(argv[i], "--version")) {
+            printf("%s %s (%s)\n", LIBREGPU_CODE_NAME, LIBREGPU_VERSION, LIBREGPU_STEP_LABEL);
+            return 0;
+        }
+    }
+
     if (ui_parse_args(&s, argc, argv, err, sizeof err) != LIBREGPU_OK) {
         fprintf(stderr, "error: %s\n", err);
         ui_print_usage(stderr, argc > 0 ? argv[0] : "libregpu");
@@ -100,14 +118,14 @@ int main(int argc, char **argv)
     } else {
         LibreGPURuntimeStatus status;
         libregpu_runtime_status(&rt, &status);
-        if (!s.quiet) ui_show_status(stdout, &rt, &status);
+        if (!s.quiet) ui_show_status(stdout, &status);
 
         CycleUi ui = { &rt, s.quiet };
         st = libregpu_runtime_run(&rt, &g_stop, s.demo , on_cycle, &ui);
         if (st != LIBREGPU_OK) { ui_show_error(stderr, "runtime", st); rc = 5; }
 
         libregpu_runtime_status(&rt, &status);
-        if (!s.quiet) ui_show_status(stdout, &rt, &status);
+        if (!s.quiet) ui_show_status(stdout, &status);
     }
 
     if (!s.quiet) printf("\n");

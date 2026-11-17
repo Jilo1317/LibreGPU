@@ -35,9 +35,7 @@ LibreGPUStatus ui_parse_args(LibreGPULauncherSettings *s, int argc, char **argv,
 
 void ui_print_banner(FILE *out);
 void ui_print_usage(FILE *out, const char *prog);
-
-void ui_show_status(FILE *out, const LibreGPURuntime *rt, const LibreGPURuntimeStatus *st);
-void ui_show_status_ex(FILE *out, const LibreGPURuntimeStatus *st);
+void ui_show_status(FILE *out, const LibreGPURuntimeStatus *st);
 void ui_show_cycle(FILE *out, uint64_t cycle, const LibreGPUCycleInfo *info);
 void ui_show_error(FILE *out, const char *where, LibreGPUStatus st);
 
@@ -110,11 +108,11 @@ LibreGPUStatus ui_parse_args(LibreGPULauncherSettings *s, int argc, char **argv,
         if (!strcmp(a, "--quiet"))                         { s->quiet = true; continue; }
         if (!strcmp(a, "--no-micro"))                      { s->config.enable_micro_pixel = false; continue; }
         if (!strcmp(a, "--no-camera"))                     { s->config.enable_camera = false; continue; }
+        if (!strcmp(a, "--camera"))                        { s->config.enable_camera = true;  continue; }
 
         
         const bool takes_value = !strcmp(a, "--game") || !strcmp(a, "--fps") || !strcmp(a, "--frames") ||
-                                 !strcmp(a, "--baseline-sample") || !strcmp(a, "--vram-budget") ||
-                                 !strcmp(a, "--mode");
+                                 !strcmp(a, "--baseline-sample");
         if (!takes_value) { set_err(err, err_len, "unknown option '%s'", a); return LIBREGPU_ERR_INVALID_ARG; }
         if (!val || looks_like_option(val)) {
             set_err(err, err_len, "%s needs a value", a);
@@ -145,16 +143,6 @@ LibreGPUStatus ui_parse_args(LibreGPULauncherSettings *s, int argc, char **argv,
                 set_err(err, err_len, "%s needs a non-negative integer", a); return LIBREGPU_ERR_INVALID_ARG;
             }
             s->config.baseline_sample_interval = (uint32_t)uv;
-        } else if (!strcmp(a, "--vram-budget")) {
-            if (!parse_u64(val, &uv)) {
-                set_err(err, err_len, "%s needs a byte count", a); return LIBREGPU_ERR_INVALID_ARG;
-            }
-            s->config.vram_budget_bytes = uv;
-        } else {                                                    
-            if (!strcmp(val, "observe"))       s->config.mode = LIBREGPU_MODE_OBSERVE;
-            else if (!strcmp(val, "compare"))  s->config.mode = LIBREGPU_MODE_COMPARE;
-            else if (!strcmp(val, "optimize")) s->config.mode = LIBREGPU_MODE_OPTIMIZE;
-            else { set_err(err, err_len, "unknown mode '%s'", val); return LIBREGPU_ERR_INVALID_ARG; }
         }
         i++;                                                        
     }
@@ -163,7 +151,8 @@ LibreGPUStatus ui_parse_args(LibreGPULauncherSettings *s, int argc, char **argv,
 
 void ui_print_banner(FILE *out)
 {
-    fprintf(out, "%s %s - game graphics workload optimizer (launcher)\n", LIBREGPU_CODE_NAME, LIBREGPU_VERSION);
+    fprintf(out, "%s %s (%s) - game graphics workload optimizer (launcher)\n",
+            LIBREGPU_CODE_NAME, LIBREGPU_VERSION, LIBREGPU_STEP_LABEL);
 }
 
 void ui_print_usage(FILE *out, const char *prog)
@@ -173,35 +162,29 @@ void ui_print_usage(FILE *out, const char *prog)
         "  --game <path>          connect a supported game (needs a native graphics backend)\n"
         "  --demo                 run the scripted game on the simulated backend\n"
         "  --frames <n>           demo length, 1..200 (default 120)\n"
-        "  --fps <F>              target loop rate F (T = 1/F); 0 = unlimited, otherwise 1..1000000 (default 0)\n"
-        "  --mode <m>             observe | compare | optimize (default optimize)\n"
+        "  --fps <F>              target loop rate F (T = 1/F); 0 = unlimited, otherwise 1..1000000\n"
         "  --no-micro             disable the Micro-Pixel Update Unit\n"
         "  --no-camera            disable the Camera Update Unit\n"
+        "  --camera               enable the Camera Update Unit (off by default)\n"
         "  --baseline-sample <n>  force the ordinary path every n cycles to measure GPU time\n"
-        "  --vram-budget <bytes>  cap LIBREGPU-OWNED allocations (scratch); game resources never count (0 = unlimited)\n"
         "  --quiet                print only errors and the final report\n"
         "  --selftest             run the validation suite and exit\n"
+        "  --gui                  launch the graphical launcher\n"
+        "  --version              print the version and exit\n"
         "  --help                 this text\n",
         prog ? prog : "libregpu");
 }
 
-void ui_show_status(FILE *out, const LibreGPURuntime *rt, const LibreGPURuntimeStatus *st)
+void ui_show_status(FILE *out, const LibreGPURuntimeStatus *st)
 {
-    if (!out || !st) return;
-    const LibreGPURuntimeState state = rt ? rt->state : st->state;
     fprintf(out, "status: runtime=%s path=%s session=%s baseline=%s z=%s mode=%s gpu_in_flight=%s\n",
-            libregpu_runtime_state_str(state),
+            libregpu_runtime_state_str(st->state),
             st->graphics_path_active ? "active" : "inactive",
             st->session_valid ? "valid" : "INVALID",
             st->baseline_exists ? "yes" : "no",
             st->z_constructed ? "built" : "-",
             st->optimizing ? "optimizing" : "ordinary/fallback",
             st->gpu_in_flight ? "yes" : "no");
-}
-
-void ui_show_status_ex(FILE *out, const LibreGPURuntimeStatus *st)
-{
-    ui_show_status(out, NULL, st);
 }
 
 void ui_show_cycle(FILE *out, uint64_t cycle, const LibreGPUCycleInfo *info)
