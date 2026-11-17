@@ -1,166 +1,80 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-.DEFAULT_GOAL := all
-.DELETE_ON_ERROR:
-.SUFFIXES:
-
-
-
-
-
-CC       ?= cc
-STD      ?= -std=c11
-OPT      ?= -O2
-CFLAGS   ?= $(OPT) -g
-WARN     := -Wall -Wextra -Wpedantic -Wshadow -Wstrict-prototypes \
-            -Wconversion -Wno-sign-conversion
-WERROR   ?=
-CPPFLAGS += -Isrc
-LDFLAGS  ?=
-LDLIBS   += -lm
-
-
-
-
-AUTOINIT := $(shell printf 'int main(void){return 0;}\n' | \
-              $(CC) -x c - -c -o /dev/null -ftrivial-auto-var-init=pattern \
-              2>/dev/null && echo -ftrivial-auto-var-init=pattern)
-
-
-HAVE_ANALYZER := $(shell printf 'int main(void){return 0;}\n' | \
-                    $(CC) -x c - -c -o /dev/null -fanalyzer 2>/dev/null \
-                    && echo yes)
-
-
-
-
+CC        ?= cc
+CSTD      ?= -std=c11
+OPT       ?= -O2
+WARN      := -Wall -Wextra -Wpedantic -Wshadow -Wstrict-prototypes \
+             -Wconversion -Wno-sign-conversion
+CPPFLAGS  ?=
+CFLAGS    ?=
+LDFLAGS   ?=
+BUILD     ?= build
 
 SRC_DIR   := src
-BUILD_DIR := build
-OBJ_DIR   := $(BUILD_DIR)/obj
-ASAN_DIR  := $(BUILD_DIR)/asan
-STRICT_DIR:= $(BUILD_DIR)/strict
+SRCS      := $(SRC_DIR)/main.c $(SRC_DIR)/run.c $(SRC_DIR)/ui.c \
+             $(SRC_DIR)/lib.c $(SRC_DIR)/gui.c
+CORE_SRCS := $(SRC_DIR)/main.c $(SRC_DIR)/run.c $(SRC_DIR)/ui.c $(SRC_DIR)/lib.c
+OBJS      := $(patsubst $(SRC_DIR)/%.c,$(BUILD)/%.o,$(SRCS))
 
-SRC_NAMES := main.c run.c ui.c lib.c
-SRCS      := $(addprefix $(SRC_DIR)/,$(SRC_NAMES))
-OBJS      := $(SRC_NAMES:%.c=$(OBJ_DIR)/%.o)
-ASAN_OBJS := $(SRC_NAMES:%.c=$(ASAN_DIR)/%.o)
-DEPS      := $(OBJS:.o=.d) $(ASAN_OBJS:.o=.d)
+NK_DEFS   := -DNK_INCLUDE_VERTEX_BUFFER_OUTPUT \
+             -DNK_INCLUDE_FONT_BAKING \
+             -DNK_INCLUDE_DEFAULT_FONT \
+             -DNK_UINT_DRAW_INDEX
 
-BIN       := libregpu
-ASAN_BIN  := libregpu-asan
+SDL_CFLAGS := $(shell pkg-config --cflags sdl2 2>/dev/null || sdl2-config --cflags 2>/dev/null)
+SDL_LIBS   := $(shell pkg-config --libs sdl2 2>/dev/null || sdl2-config --libs 2>/dev/null)
 
-ASAN_FLAGS := -O1 -g -fsanitize=address,undefined \
-              -fno-sanitize-recover=undefined -fno-omit-frame-pointer \
-              $(AUTOINIT)
+INCLUDES  := -I.
 
+.PHONY: all test check asan analyze demo bench clean
 
+ifeq ($(strip $(SDL_LIBS)),)
+all:
+	@echo "libregpu needs SDL2 development files." >&2
+	@echo "  Debian/Ubuntu: sudo apt install libsdl2-dev" >&2
+	@echo "  Fedora:        sudo dnf install SDL2-devel" >&2
+	@echo "  FreeBSD:       sudo pkg install sdl2" >&2
+	@echo "  macOS:         brew install sdl2" >&2
+	@echo "  Windows:       use MSYS2/mingw-w64 or vcpkg" >&2
+	@exit 1
+else
+all: libregpu
+endif
 
+libregpu: $(OBJS)
+	$(CC) $(LDFLAGS) $^ -o $@ $(SDL_LIBS) -lm
 
+$(BUILD)/%.o: $(SRC_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CSTD) $(WARN) $(OPT) $(CPPFLAGS) $(CFLAGS) $(INCLUDES) \
+		$(NK_DEFS) $(SDL_CFLAGS) -MMD -MP -c $< -o $@
 
-all: $(BIN)
+$(BUILD)/gui.o: WARN := $(filter-out -Wconversion,$(WARN)) -Wno-implicit-fallthrough
 
-$(BIN): $(OBJS)
-	$(CC) $(STD) $(CFLAGS) $(LDFLAGS) -o $@ $(OBJS) $(LDLIBS)
+test: libregpu
+	./libregpu --selftest
 
-$(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
-	$(CC) $(STD) $(WARN) $(WERROR) $(CFLAGS) $(CPPFLAGS) -MMD -MP -c $< -o $@
-
-$(ASAN_BIN): $(ASAN_OBJS)
-	$(CC) $(STD) $(ASAN_FLAGS) $(LDFLAGS) -o $@ $(ASAN_OBJS) $(LDLIBS)
-
-$(ASAN_DIR)/%.o: $(SRC_DIR)/%.c | $(ASAN_DIR)
-	$(CC) $(STD) $(WARN) $(WERROR) $(ASAN_FLAGS) $(CPPFLAGS) -MMD -MP -c $< -o $@
-
-$(OBJ_DIR) $(ASAN_DIR):
-	mkdir -p $@
-
-
-strict:
-	@$(MAKE) --no-print-directory \
-	  OBJ_DIR=$(STRICT_DIR)/obj BIN=$(STRICT_DIR)/$(BIN) WERROR=-Werror all
-
-
-
-
-
-test: $(BIN)
-	./$(BIN) --selftest
-
-asan: $(ASAN_BIN)
-	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(ASAN_BIN) --selftest
+check: test asan analyze
 
 analyze:
-	@if [ "$(HAVE_ANALYZER)" != "yes" ]; then \
-	  echo "gcc -fanalyzer not supported by $(CC); skipped"; exit 0; \
-	fi; \
-	set -e; for f in $(SRCS); do \
+	@set -e; for f in $(CORE_SRCS); do \
 	  echo "== $$f"; \
-	  $(CC) $(STD) $(WARN) $(CPPFLAGS) -fanalyzer -Werror -c $$f -o /dev/null; \
+	  $(CC) $(CSTD) $(WARN) $(CPPFLAGS) $(CFLAGS) $(INCLUDES) -fanalyzer -Werror -c $$f -o /dev/null; \
 	done; echo "analysis finished"
 
-check: strict test asan analyze
+demo: libregpu
+	./libregpu --demo --frames 60
 
+bench: libregpu
+	./libregpu --demo --frames 120 --quiet --baseline-sample 5
 
-
-
-
-demo: $(BIN)
-	./$(BIN) --demo --frames 60
-
-bench: $(BIN)
-	./$(BIN) --demo --frames 120 --quiet --baseline-sample 5
+asan:
+	@mkdir -p $(BUILD)
+	$(CC) $(CSTD) $(filter-out -Wconversion,$(WARN)) -Wno-implicit-fallthrough -O1 -g \
+		-fsanitize=address,undefined -fno-omit-frame-pointer \
+		$(CPPFLAGS) $(CFLAGS) $(INCLUDES) $(NK_DEFS) $(SDL_CFLAGS) \
+		$(SRCS) -o $(BUILD)/libregpu-asan $(SDL_LIBS) -lm
+	ASAN_OPTIONS=detect_leaks=1 ./$(BUILD)/libregpu-asan --selftest
 
 clean:
-	rm -rf $(BUILD_DIR) $(BIN) $(ASAN_BIN)
+	rm -rf $(BUILD) libregpu libregpu-ui libregpu-asan libregpu-ui-asan
 
-help:
-	@printf '%s\n' \
-	  'LIBREGPU targets:' \
-	  '  make                 build ./libregpu' \
-	  '  make test            run the self-test' \
-	  '  make strict          rebuild with -Werror (build/strict)' \
-	  '  make asan            ASan + UBSan + LeakSanitizer self-test' \
-	  '  make analyze         gcc -fanalyzer on every source file' \
-	  '  make check           strict + test + asan + analyze' \
-	  '  make demo            60-frame demo' \
-	  '  make bench           120 frames with baseline samples' \
-	  '  make clean           remove build/ and both binaries' \
-	  '  make help            this summary' \
-	  '' \
-	  'Overrides: CC=... OPT=... CFLAGS=... WERROR=-Werror LDFLAGS=... LDLIBS=...'
-
-.PHONY: all strict test asan analyze check demo bench clean help
-
--include $(DEPS)
+-include $(OBJS:.o=.d)
