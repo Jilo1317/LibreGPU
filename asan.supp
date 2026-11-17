@@ -1,0 +1,15 @@
+# LeakSanitizer suppressions for the opt-in GPU targets.
+#
+# Mesa's Gallium driver (and the EGL/GLX front ends) allocate screen, context
+# and command-buffer state with process lifetime and only release some of it
+# when the driver library is unloaded.  Those allocations belong to the
+# graphics driver, not to LibreGPU: every LibreGPU texture, framebuffer, query and
+# sync object is released through libregpu_backend_destroy().
+#
+# The core (`libregpu`) ASan run has no such suppressions and must stay clean.
+leak:libgallium
+leak:libEGL_mesa
+leak:libGLX_mesa
+leak:libLLVM
+leak:libdrm
+leak:dri
