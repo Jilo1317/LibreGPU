@@ -1,31 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
 #  define _POSIX_C_SOURCE 200809L
 #endif
@@ -38,7 +10,6 @@
 #    define NOMINMAX
 #  endif
 #endif
-
 
 #define SDL_MAIN_HANDLED
 
@@ -62,6 +33,7 @@
 
 #include <SDL.h>
 #include "nuklear.h"
+#include "libregpu_ui_icons.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -85,21 +57,9 @@
 extern char **environ;
 #endif
 
-
-
-
-
-
-
-
 #define LIBREGPU_UI_DECLARATIONS_ONLY
 #include "ui.c"
 #undef LIBREGPU_UI_DECLARATIONS_ONLY
-
-
-
-
-
 
 #include <stddef.h>
 #include <stdint.h>
@@ -113,15 +73,15 @@ extern char **environ;
 #define LIBREGPU_ERROR_CAP         160
 #define LIBREGPU_PI                3.14159265358979323846f
 
-
 #define LIBREGPU_REFERENCE_W      720.0f
 #define LIBREGPU_REFERENCE_H      591.0f
-
 
 #define LIBREGPU_PAGE_SCROLL_TIME 0.30f
 #define LIBREGPU_PAGE_SCROLL_PX   64.0f
 #define LIBREGPU_LOGO_SHAKE_TIME  0.16f
 #define LIBREGPU_LOGO_SHAKE_PX    2.2f
+#define LIBREGPU_INFO_MARGIN      27.0f
+#define LIBREGPU_INFO_RADIUS      13.0f
 #define LIBREGPU_RIPPLE_LIFE      0.78f
 #define LIBREGPU_RIPPLE_DELAY     0.16f
 #define LIBREGPU_RIPPLE_COUNT     3
@@ -129,10 +89,10 @@ extern char **environ;
 #define LIBREGPU_RIPPLE_MAX_R     118.0f
 
 typedef struct LibreGPUUIProfile {
-    uint32_t id;                  
+    uint32_t id;
     char game_path[LIBREGPU_UI_PATH_MAX];
-    LibreGPUConfig config;           
-    struct nk_image thumbnail;   
+    LibreGPUConfig config;
+    struct nk_image thumbnail;
     int has_thumbnail;
     char name[96];
 } LibreGPUUIProfile;
@@ -140,27 +100,28 @@ typedef struct LibreGPUUIProfile {
 typedef struct LibreGPUUIHooks {
     void *userdata;
 
-    
     void (*launch_profile)(void *userdata,
                            const LibreGPULauncherSettings *settings);
 
-    
     int (*pick_executable)(void *userdata,
                            char *out_path, size_t out_capacity);
 
-    
     int (*path_is_file)(void *userdata, const char *path);
 
-    
     int (*save_profile)(void *userdata,
                         const LibreGPULauncherSettings *settings,
                         LibreGPUUIProfile *out_profile,
                         char *error_text, size_t error_capacity);
 
-    
+    int (*update_profile)(void *userdata, uint32_t profile_id,
+                          const LibreGPULauncherSettings *settings,
+                          LibreGPUUIProfile *out_profile,
+                          char *error_text, size_t error_capacity);
+
     int (*delete_profile)(void *userdata, uint32_t profile_id);
 
-    
+    int (*fill_diagnostics)(void *userdata, char *text, size_t capacity);
+
     void (*quit)(void *userdata);
 } LibreGPUUIHooks;
 
@@ -172,17 +133,27 @@ typedef struct LibreGPUUI {
     struct nk_image logo;
     int has_logo;
 
+    struct nk_image icon_add;
+    int has_icon_add;
+    struct nk_image icon_close;
+    int has_icon_close;
+    struct nk_image icon_warning;
+    int has_icon_warning;
+
     LibreGPUUIProfile profiles[LIBREGPU_UI_MAX_PROFILES];
     size_t profile_count;
     size_t current_page;
     size_t target_page;
 
     int config_open;
+    uint32_t editing_profile_id;
     char path_text[LIBREGPU_UI_PATH_MAX];
     char fps_text[LIBREGPU_FPS_CAP];
     int path_invalid;
     int fps_invalid;
     char backend_error[LIBREGPU_ERROR_CAP];
+
+    int info_open;
 
     int context_open;
     uint32_t context_profile_id;
@@ -198,13 +169,18 @@ typedef struct LibreGPUUI {
     int quit_requested;
 } LibreGPUUI;
 
-
 void libregpu_ui_init(LibreGPUUI *ui,
                    LibreGPULauncherSettings *settings,
                    const LibreGPUUIHooks *hooks,
                    struct nk_image logo,
                    int has_logo);
 void libregpu_ui_set_logo(LibreGPUUI *ui, struct nk_image logo, int has_logo);
+void libregpu_ui_set_icons(LibreGPUUI *ui,
+                        struct nk_image add, int has_add,
+                        struct nk_image close, int has_close);
+
+void libregpu_ui_set_warning_icon(LibreGPUUI *ui,
+                               struct nk_image warning, int has_warning);
 void libregpu_ui_set_profiles(LibreGPUUI *ui,
                            const LibreGPUUIProfile *profiles,
                            size_t profile_count);
@@ -214,10 +190,6 @@ void libregpu_ui_draw(struct nk_context *ctx,
                    float window_width,
                    float window_height,
                    float delta_seconds);
-
-
-
-
 
 typedef struct LibreGPUNkSdl2 {
     SDL_Window *window;
@@ -238,28 +210,16 @@ typedef struct LibreGPUNkSdl2 {
     int ready;
 } LibreGPUNkSdl2;
 
-
-
 int libregpu_nk_sdl2_init(LibreGPUNkSdl2 *nk, SDL_Window *window, SDL_Renderer *renderer);
 
-
 void libregpu_nk_sdl2_shutdown(LibreGPUNkSdl2 *nk);
-
 
 void libregpu_nk_sdl2_input_begin(LibreGPUNkSdl2 *nk);
 void libregpu_nk_sdl2_input_end(LibreGPUNkSdl2 *nk);
 
-
-
 void libregpu_nk_sdl2_handle_event(LibreGPUNkSdl2 *nk, const SDL_Event *event);
 
-
-
 void libregpu_nk_sdl2_render(LibreGPUNkSdl2 *nk);
-
-
-
-
 
 #define LIBREGPU_PATH_NAME_MAX 256
 
@@ -268,52 +228,29 @@ typedef struct LibreGPUDirEntry {
     int is_directory;
 } LibreGPUDirEntry;
 
-
 int libregpu_path_join(char *out, size_t capacity,
                     const char *directory, const char *name);
 
-
-
 int libregpu_path_parent(const char *path, char *out, size_t capacity);
 
-
 int libregpu_path_is_file(const char *path);
-
-
 
 int libregpu_path_is_executable_file(const char *path);
 
 int libregpu_path_is_directory(const char *path);
 
-
-
 int libregpu_path_replace_file(const char *temporary, const char *final_path);
-
-
 
 int libregpu_path_list_directory(const char *directory,
                               LibreGPUDirEntry *entries, size_t capacity,
                               size_t *out_count);
 
-
 const char *libregpu_path_basename(const char *path);
-
-
 
 int libregpu_path_initial_directory(char *out, size_t capacity);
 
-
-
-
-
-
-
 int libregpu_launch_detached(const char *path,
                           char *error_text, size_t error_capacity);
-
-
-
-
 
 #define LIBREGPU_PROFILE_PATH_MAX 512
 #define LIBREGPU_PROFILE_NAME_MAX 96
@@ -336,35 +273,26 @@ typedef struct LibreGPUProfileStore {
     int loaded;
 } LibreGPUProfileStore;
 
-
-
 int libregpu_profiles_init(LibreGPUProfileStore *store, const char *directory);
 
 size_t libregpu_profiles_count(const LibreGPUProfileStore *store);
 const LibreGPUStoredProfile *libregpu_profiles_at(const LibreGPUProfileStore *store,
                                             size_t index);
 
-
-
 int libregpu_profiles_add(LibreGPUProfileStore *store,
                        const char *path, int fps,
                        LibreGPUStoredProfile *out_profile,
                        char *error_text, size_t error_capacity);
 
-
+int libregpu_profiles_update(LibreGPUProfileStore *store, uint32_t id,
+                          const char *path, int fps,
+                          LibreGPUStoredProfile *out_profile,
+                          char *error_text, size_t error_capacity);
 int libregpu_profiles_delete(LibreGPUProfileStore *store, uint32_t id);
 
 const char *libregpu_profiles_file_path(const LibreGPUProfileStore *store);
 
-
-
-
-
 #define LIBREGPU_NK_FONT_HEIGHT 15.0f
-
-
-
-
 
 static void libregpu_nk_sdl2_copy(nk_handle userdata, const char *text, int len)
 {
@@ -372,7 +300,6 @@ static void libregpu_nk_sdl2_copy(nk_handle userdata, const char *text, int len)
     (void)userdata;
     if (!text || len <= 0) return;
 
-    
     terminated = (char *)SDL_malloc((size_t)len + 1u);
     if (!terminated) return;
     SDL_memcpy(terminated, text, (size_t)len);
@@ -392,17 +319,13 @@ static void libregpu_nk_sdl2_paste(nk_handle userdata, struct nk_text_edit *edit
     SDL_free(text);
 }
 
-
-
-
-
 static void libregpu_nk_sdl2_theme(struct nk_context *ctx)
 {
     struct nk_color table[NK_COLOR_COUNT];
 
     memset(table, 0, sizeof(table));
-    table[NK_COLOR_TEXT]                    = nk_rgba(226, 229, 236, 255);
-    table[NK_COLOR_WINDOW]                  = nk_rgba(29, 32, 38, 255);
+    table[NK_COLOR_TEXT]                    = nk_rgba(255, 255, 255, 255);
+    table[NK_COLOR_WINDOW]                  = nk_rgba(29, 32, 38, 180);
     table[NK_COLOR_HEADER]                  = nk_rgba(37, 40, 47, 255);
     table[NK_COLOR_BORDER]                  = nk_rgba(70, 75, 86, 255);
     table[NK_COLOR_BUTTON]                  = nk_rgba(52, 56, 66, 255);
@@ -433,10 +356,6 @@ static void libregpu_nk_sdl2_theme(struct nk_context *ctx)
     nk_style_from_table(ctx, table);
 }
 
-
-
-
-
 static SDL_Texture *libregpu_nk_sdl2_make_texture(SDL_Renderer *renderer,
                                                const void *pixels,
                                                int width, int height)
@@ -460,52 +379,34 @@ static SDL_Texture *libregpu_nk_sdl2_make_texture(SDL_Renderer *renderer,
     return texture;
 }
 
-
-
-
-
-
 static int libregpu_nk_sdl2_find_font(char *out, size_t capacity)
 {
     static const char *const absolute_candidates[] = {
-        
-        "/System/Library/Fonts/Supplemental/Times New Roman.ttf",
-        "/System/Library/Fonts/Times.ttc",
-        "/Library/Fonts/Times New Roman.ttf",
-        
-        "C:\\Windows\\Fonts\\times.ttf",
-        "C:\\Windows\\Fonts\\Times New Roman.ttf",
-        
-        "/usr/share/fonts/truetype/msttcorefonts/Times_New_Roman.ttf",
-        "/usr/share/fonts/truetype/msttcorefonts/times.ttf",
-        "/usr/share/fonts/TTF/Times_New_Roman.ttf",
-        "/usr/local/share/fonts/Times_New_Roman.ttf",
-        "/usr/local/share/fonts/times.ttf",
-        
-        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
-        "/usr/share/fonts/liberation/LiberationSerif-Regular.ttf",
-        "/usr/share/fonts/liberation-serif/LiberationSerif-Regular.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationSerif-Regular.ttf",
-        "/usr/share/fonts/truetype/tinos/Tinos-Regular.ttf",
-        "/usr/share/fonts/tinos/Tinos-Regular.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSerif-Regular.ttf",
-        "/usr/share/fonts/noto/NotoSerif-Regular.ttf",
-        "/usr/share/fonts/TTF/DejaVuSerif.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf"
+
+        "/usr/share/fonts/noto/NotoSans-Bold.ttf",
+        "/usr/share/fonts/noto/NotoSans-BoldItalic.ttf",
+
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/liberation-sans/LiberationSans-Bold.ttf",
+
+        "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+        "/usr/share/fonts/noto/NotoSans-Bold.ttf"
     };
     static const char *const bundled[] = {
-        "times.ttf",
-        "Times New Roman.ttf",
-        "timesnewroman.ttf",
-        "fonts/times.ttf",
-        "fonts/Times New Roman.ttf"
+        "NotoSans-Bold.ttf",
+        "DejaVuSans-Bold.ttf",
+        "LiberationSans-Bold.ttf",
+        "fonts/NotoSans-Bold.ttf",
+        "fonts/DejaVuSans-Bold.ttf"
     };
     static const char *const user_paths[] = {
-        ".fonts/times.ttf",
-        ".fonts/Times New Roman.ttf",
-        ".local/share/fonts/times.ttf",
-        ".local/share/fonts/Times New Roman.ttf",
-        "Library/Fonts/Times New Roman.ttf"
+        ".fonts/NotoSans-Bold.ttf",
+        ".fonts/DejaVuSans-Bold.ttf",
+        ".local/share/fonts/NotoSans-Bold.ttf",
+        ".local/share/fonts/DejaVuSans-Bold.ttf"
     };
     const char *override = getenv("LIBREGPU_UI_FONT");
     const char *home = getenv("HOME");
@@ -658,10 +559,6 @@ void libregpu_nk_sdl2_shutdown(LibreGPUNkSdl2 *nk)
     memset(nk, 0, sizeof(*nk));
 }
 
-
-
-
-
 void libregpu_nk_sdl2_input_begin(LibreGPUNkSdl2 *nk)
 {
     if (!nk || !nk->ready) return;
@@ -764,7 +661,7 @@ static void libregpu_nk_sdl2_text(LibreGPUNkSdl2 *nk, const char *text)
             rune = (nk_rune)(*p & 0x07u);
             length = 4;
         } else {
-            ++p; 
+            ++p;
             continue;
         }
 
@@ -834,7 +731,6 @@ void libregpu_nk_sdl2_handle_event(LibreGPUNkSdl2 *nk, const SDL_Event *event)
         if (!translated) return;
 
         if (down && event->key.repeat) {
-            
 
             nk_input_key(&nk->ctx, key, 0);
             nk_input_key(&nk->ctx, key, 1);
@@ -848,10 +744,6 @@ void libregpu_nk_sdl2_handle_event(LibreGPUNkSdl2 *nk, const SDL_Event *event)
         break;
     }
 }
-
-
-
-
 
 static SDL_Texture *libregpu_nk_sdl2_texture(LibreGPUNkSdl2 *nk, nk_handle handle)
 {
@@ -905,10 +797,6 @@ void libregpu_nk_sdl2_render(LibreGPUNkSdl2 *nk)
     nk_buffer_clear(&nk->elements);
     nk_clear(&nk->ctx);
 }
-
-
-
-
 
 #if defined(_WIN32)
 #  define LIBREGPU_PATH_SEP '\\'
@@ -1179,11 +1067,42 @@ int libregpu_path_initial_directory(char *out, size_t capacity)
 #endif
 }
 
-
-
-
-
 #define LIBREGPU_LAUNCH_PATH_MAX 4096
+
+#if !defined(_WIN32)
+static int libregpu_interposer_path(char *out, size_t capacity)
+{
+    const char *env = getenv("LIBREGPU_INTERPOSER");
+    if (env && env[0]) {
+        if (strlen(env) >= capacity) return 0;
+        (void)snprintf(out, capacity, "%s", env);
+        return access(out, R_OK) == 0;
+    }
+    char *base = SDL_GetBasePath();
+    if (!base) return 0;
+
+    static const char *const suffixes[] = {
+        "liblibregpu_interpose.so",
+        "../lib/libregpu/liblibregpu_interpose.so",
+        "../lib/liblibregpu_interpose.so"
+    };
+    int found = 0;
+    for (size_t i = 0; i < sizeof suffixes / sizeof suffixes[0] && !found; ++i) {
+        const int written = snprintf(out, capacity, "%s%s", base, suffixes[i]);
+        if (written <= 0 || (size_t)written >= capacity) continue;
+        if (access(out, R_OK) == 0) found = 1;
+    }
+    SDL_free(base);
+    return found;
+}
+#else
+static int libregpu_interposer_path(char *out, size_t capacity)
+{
+    (void)out;
+    (void)capacity;
+    return 0;
+}
+#endif
 
 int libregpu_launch_detached(const char *path,
                           char *error_text, size_t error_capacity)
@@ -1271,9 +1190,30 @@ int libregpu_launch_detached(const char *path,
         }
 
         if (result == 0) {
+            char interposer[LIBREGPU_LAUNCH_PATH_MAX];
+            char saved_preload[LIBREGPU_LAUNCH_PATH_MAX];
+            const char *existing = getenv("LD_PRELOAD");
+            const int have_existing = existing && existing[0] &&
+                strlen(existing) < sizeof saved_preload;
+            if (have_existing) (void)snprintf(saved_preload, sizeof saved_preload, "%s", existing);
+
+            const int have_interposer = libregpu_interposer_path(interposer, sizeof interposer);
+            if (have_interposer) {
+                char preload[LIBREGPU_LAUNCH_PATH_MAX * 2];
+                const int w = have_existing
+                    ? snprintf(preload, sizeof preload, "%s:%s", interposer, saved_preload)
+                    : snprintf(preload, sizeof preload, "%s", interposer);
+                if (w > 0 && (size_t)w < sizeof preload) (void)setenv("LD_PRELOAD", preload, 1);
+            }
+
             pid_t pid = 0;
             result = posix_spawn(&pid, path, &actions, &attributes,
                                  argv, environ);
+
+            if (have_interposer) {
+                if (have_existing) (void)setenv("LD_PRELOAD", saved_preload, 1);
+                else               (void)unsetenv("LD_PRELOAD");
+            }
         }
 
         if (have_attributes) (void)posix_spawnattr_destroy(&attributes);
@@ -1290,10 +1230,6 @@ int libregpu_launch_detached(const char *path,
     }
 #endif
 }
-
-
-
-
 
 #define LIBREGPU_PROFILE_HEADER "libregpu-profiles"
 #define LIBREGPU_PROFILE_VERSION "1"
@@ -1442,7 +1378,7 @@ static int libregpu_profiles_load(LibreGPUProfileStore *store)
 
     file = fopen(store->file_path, "rb");
     if (!file) {
-        
+
         return (errno == ENOENT) ? 1 : 0;
     }
 
@@ -1503,20 +1439,6 @@ static int libregpu_profiles_load(LibreGPUProfileStore *store)
             store->next_id = id + 1;
             if (store->next_id == 0) store->next_id = 1;
         }
-    }
-
-    for (;;) {
-        size_t k;
-        int taken = 0;
-        for (k = 0; k < store->count; ++k) {
-            if (store->items[k].id == store->next_id) {
-                taken = 1;
-                break;
-            }
-        }
-        if (!taken) break;
-        ++store->next_id;
-        if (store->next_id == 0) store->next_id = 1;
     }
 
     fclose(file);
@@ -1663,6 +1585,61 @@ int libregpu_profiles_add(LibreGPUProfileStore *store,
     return 1;
 }
 
+int libregpu_profiles_update(LibreGPUProfileStore *store, uint32_t id,
+                          const char *path, int fps,
+                          LibreGPUStoredProfile *out_profile,
+                          char *error_text, size_t error_capacity)
+{
+    LibreGPUStoredProfile previous;
+    LibreGPUStoredProfile updated;
+    const char *base;
+    size_t index;
+
+    if (error_text && error_capacity > 0) error_text[0] = '\0';
+    if (!store || !store->loaded || id == 0 || !path || path[0] == '\0') {
+        libregpu_profiles_error(error_text, error_capacity, "Invalid profile");
+        return 0;
+    }
+    if (strlen(path) >= sizeof(updated.path)) {
+        libregpu_profiles_error(error_text, error_capacity,
+                             "Path is too long to store");
+        return 0;
+    }
+    if (fps < 0 || fps > LIBREGPU_PROFILE_FPS_MAX) {
+        libregpu_profiles_error(error_text, error_capacity, "Invalid FPS value");
+        return 0;
+    }
+
+    for (index = 0; index < store->count; ++index) {
+        if (store->items[index].id == id) break;
+    }
+    if (index >= store->count) {
+        libregpu_profiles_error(error_text, error_capacity,
+                             "Profile no longer exists");
+        return 0;
+    }
+
+    previous = store->items[index];
+    updated = previous;
+    updated.fps = fps;
+    (void)snprintf(updated.path, sizeof(updated.path), "%s", path);
+
+    base = libregpu_path_basename(path);
+    if (!base || base[0] == '\0') base = "Game";
+    (void)snprintf(updated.name, sizeof(updated.name), "%s", base);
+
+    store->items[index] = updated;
+    if (!libregpu_profiles_save(store)) {
+        store->items[index] = previous;
+        libregpu_profiles_error(error_text, error_capacity,
+                             "Could not write the profile file");
+        return 0;
+    }
+
+    if (out_profile) *out_profile = updated;
+    return 1;
+}
+
 int libregpu_profiles_delete(LibreGPUProfileStore *store, uint32_t id)
 {
     size_t index;
@@ -1696,30 +1673,20 @@ const char *libregpu_profiles_file_path(const LibreGPUProfileStore *store)
     return store ? store->file_path : "";
 }
 
-
-
-
-
-
-
 typedef struct LibreGPUPoint {
     float x;
     float y;
 } LibreGPUPoint;
 
 static const LibreGPUPoint libregpu_orbit_offsets[7] = {
-    {123.0f, -163.0f},
-    {164.0f, -120.0f},
-    {197.0f,  -69.0f},
-    {215.0f,   -9.0f},
-    {205.0f,   52.0f},
-    {168.0f,  114.0f},
-    {113.0f,  155.0f}
+    {0.0f, -194.6f},
+    {97.3f, -168.5f},
+    {168.5f, -97.3f},
+    {194.6f, 0.0f},
+    {168.5f, 97.3f},
+    {97.3f, 168.5f},
+    {0.0f, 194.6f},
 };
-
-
-
-
 
 static float libregpu_clampf(float value, float low, float high)
 {
@@ -1753,8 +1720,6 @@ static int libregpu_point_in_circle(float px, float py,
     const float dy = py - cy;
     return (dx * dx + dy * dy) <= (radius * radius);
 }
-
-
 
 static int libregpu_mouse_clicked_circle(const struct nk_context *ctx,
                                       enum nk_buttons button,
@@ -1835,14 +1800,12 @@ static int libregpu_default_path_is_file(const char *path)
     if (!path || path[0] == '\0') return 0;
     if (stat(path, &info) != 0) return 0;
 
-    
 #if defined(S_ISREG)
     if (!S_ISREG(info.st_mode)) return 0;
 #elif defined(_S_IFMT) && defined(_S_IFREG)
     if ((info.st_mode & _S_IFMT) != _S_IFREG) return 0;
 #endif
 
-    
     file = fopen(path, "rb");
     if (!file) return 0;
     fclose(file);
@@ -1867,22 +1830,41 @@ static void libregpu_clear_config_feedback(LibreGPUUI *ui)
 static void libregpu_open_config(LibreGPUUI *ui)
 {
     ui->config_open = 1;
+    ui->editing_profile_id = 0;
+    ui->info_open = 0;
     ui->path_text[0] = '\0';
     ui->fps_text[0] = '\0';
+    libregpu_clear_config_feedback(ui);
+}
+
+static void libregpu_open_config_edit(LibreGPUUI *ui, uint32_t profile_id)
+{
+    const int index = libregpu_profile_index_by_id(ui, profile_id);
+    if (index < 0) return;
+
+    ui->config_open = 1;
+    ui->editing_profile_id = profile_id;
+    ui->info_open = 0;
+    (void)snprintf(ui->path_text, sizeof(ui->path_text), "%s",
+                   ui->profiles[index].game_path);
+    (void)snprintf(ui->fps_text, sizeof(ui->fps_text), "%d",
+                   (int)(ui->profiles[index].config.target_loops_per_second + 0.5));
     libregpu_clear_config_feedback(ui);
 }
 
 static void libregpu_close_config(LibreGPUUI *ui)
 {
     ui->config_open = 0;
+    ui->editing_profile_id = 0;
     ui->path_text[0] = '\0';
     ui->fps_text[0] = '\0';
     libregpu_clear_config_feedback(ui);
 }
 
-
-
-
+static void libregpu_close_info(LibreGPUUI *ui)
+{
+    ui->info_open = 0;
+}
 
 void libregpu_ui_init(LibreGPUUI *ui,
                    LibreGPULauncherSettings *settings,
@@ -1910,6 +1892,25 @@ void libregpu_ui_set_logo(LibreGPUUI *ui, struct nk_image logo, int has_logo)
     ui->has_logo = has_logo ? 1 : 0;
 }
 
+void libregpu_ui_set_icons(LibreGPUUI *ui,
+                        struct nk_image add, int has_add,
+                        struct nk_image close, int has_close)
+{
+    if (!ui) return;
+    ui->icon_add = add;
+    ui->has_icon_add = has_add ? 1 : 0;
+    ui->icon_close = close;
+    ui->has_icon_close = has_close ? 1 : 0;
+}
+
+void libregpu_ui_set_warning_icon(LibreGPUUI *ui,
+                               struct nk_image warning, int has_warning)
+{
+    if (!ui) return;
+    ui->icon_warning = warning;
+    ui->has_icon_warning = has_warning ? 1 : 0;
+}
+
 void libregpu_ui_set_profiles(LibreGPUUI *ui,
                            const LibreGPUUIProfile *profiles,
                            size_t profile_count)
@@ -1931,7 +1932,6 @@ void libregpu_ui_set_profiles(LibreGPUUI *ui,
             candidate.game_path[LIBREGPU_UI_PATH_MAX - 1] = '\0';
             candidate.name[sizeof candidate.name - 1] = '\0';
 
-            
             for (j = 0; j < accepted; ++j) {
                 if (ui->profiles[j].id == candidate.id) {
                     duplicate_id = 1;
@@ -1965,10 +1965,6 @@ int libregpu_ui_quit_requested(const LibreGPUUI *ui)
     return ui ? ui->quit_requested : 0;
 }
 
-
-
-
-
 static void libregpu_start_logo_response(LibreGPUUI *ui)
 {
     const size_t pages = libregpu_page_count(ui);
@@ -1989,7 +1985,7 @@ static void libregpu_start_logo_response(LibreGPUUI *ui)
 static void libregpu_update_animations(LibreGPUUI *ui, float dt)
 {
     if (!isfinite(dt) || dt < 0.0f) dt = 0.0f;
-    if (dt > 0.10f) dt = 0.10f; 
+    if (dt > 0.10f) dt = 0.10f;
 
     if (ui->page_animating) {
         ui->page_elapsed += dt;
@@ -2042,21 +2038,97 @@ static float libregpu_logo_shake_offset_y(const LibreGPUUI *ui, float scale)
            (0.65f * LIBREGPU_LOGO_SHAKE_PX * scale * envelope);
 }
 
-
-
-
-
-static void libregpu_draw_image(struct nk_command_buffer *canvas,
-                             const struct nk_image *image,
-                             int has_image,
-                             float cx, float cy, float radius,
-                             struct nk_color tint)
+static unsigned char *libregpu_ui_icon_decode(const LibreGPUUiIconRle *icon)
 {
-    if (!canvas || !image || !has_image) return;
-    nk_draw_image(canvas, libregpu_circle_rect(cx, cy, radius), image, tint);
+    size_t total;
+    size_t offset = 0;
+    size_t out = 0;
+    unsigned char *rgba;
+
+    if (!icon || !icon->data || icon->width == 0 || icon->height == 0)
+        return NULL;
+    total = (size_t)icon->width * (size_t)icon->height;
+    rgba = (unsigned char *)malloc(total * 4u);
+    if (!rgba) return NULL;
+
+    while (out < total) {
+        unsigned run;
+        unsigned i;
+        unsigned char r, g, b, a;
+
+        if (offset + 6u > icon->size) break;
+        run = (unsigned)icon->data[offset] |
+              ((unsigned)icon->data[offset + 1] << 8);
+        if (run == 0 || (size_t)run > total - out) break;
+        r = icon->data[offset + 2];
+        g = icon->data[offset + 3];
+        b = icon->data[offset + 4];
+        a = icon->data[offset + 5];
+        for (i = 0; i < run; ++i) {
+            unsigned char *pixel = rgba + (out + (size_t)i) * 4u;
+            pixel[0] = r;
+            pixel[1] = g;
+            pixel[2] = b;
+            pixel[3] = a;
+        }
+        offset += 6u;
+        out += (size_t)run;
+    }
+
+    if (out != total) {
+        free(rgba);
+        return NULL;
+    }
+    return rgba;
 }
 
+static int libregpu_ui_icon_ok(const LibreGPUUiIconRle *icon)
+{
+    unsigned char *rgba;
+    size_t total;
+    size_t opaque = 0;
+    size_t clear = 0;
+    size_t i;
+    int ok;
 
+    rgba = libregpu_ui_icon_decode(icon);
+    if (!rgba) return 0;
+    total = (size_t)icon->width * (size_t)icon->height;
+    for (i = 0; i < total; ++i) {
+        if (rgba[i * 4u + 3u] == 255u) ++opaque;
+        else if (rgba[i * 4u + 3u] == 0u) ++clear;
+    }
+    ok = opaque > total / 20u && clear > total / 20u;
+    free(rgba);
+    return ok;
+}
+
+static void libregpu_draw_image_fit(struct nk_command_buffer *canvas,
+                                 const struct nk_image *image,
+                                 int has_image,
+                                 float cx, float cy,
+                                 float max_width, float max_height,
+                                 struct nk_color tint)
+{
+    float image_w;
+    float image_h;
+    float scale;
+    struct nk_rect rect;
+
+    if (!canvas || !image || !has_image ||
+        max_width <= 0.0f || max_height <= 0.0f)
+        return;
+    image_w = (float)image->w;
+    image_h = (float)image->h;
+    if (image_w <= 0.0f || image_h <= 0.0f) return;
+
+    scale = fminf(max_width / image_w, max_height / image_h);
+    rect.w = image_w * scale;
+    rect.h = image_h * scale;
+    rect.x = cx - rect.w * 0.5f;
+    rect.y = cy - rect.h * 0.5f;
+    nk_draw_image(canvas, rect, image, tint);
+}
 
 static void libregpu_stroke_circle_minimal(struct nk_command_buffer *canvas,
                                         float cx, float cy, float radius,
@@ -2068,6 +2140,7 @@ static void libregpu_stroke_circle_minimal(struct nk_command_buffer *canvas,
 }
 
 static void libregpu_draw_plus(struct nk_command_buffer *canvas,
+                            const LibreGPUUI *ui,
                             float cx, float cy, float radius,
                             float scale, int hovered)
 {
@@ -2076,11 +2149,18 @@ static void libregpu_draw_plus(struct nk_command_buffer *canvas,
     const struct nk_color ink = nk_rgba(22, 24, 28, 245);
 
     libregpu_stroke_circle_minimal(canvas, cx, cy, radius, scale, hovered);
+    if (ui && ui->has_icon_add) {
+        const float box = radius * (hovered ? 1.30f : 1.24f);
+        libregpu_draw_image_fit(canvas, &ui->icon_add, 1, cx, cy,
+                             box, box, nk_rgba(255, 255, 255, 255));
+        return;
+    }
     nk_stroke_line(canvas, cx - arm, cy, cx + arm, cy, thick, ink);
     nk_stroke_line(canvas, cx, cy - arm, cx, cy + arm, thick, ink);
 }
 
 static void libregpu_draw_close(struct nk_command_buffer *canvas,
+                             const LibreGPUUI *ui,
                              float cx, float cy, float radius,
                              float scale, int hovered)
 {
@@ -2089,10 +2169,31 @@ static void libregpu_draw_close(struct nk_command_buffer *canvas,
     const struct nk_color ink = nk_rgba(22, 24, 28, 245);
 
     libregpu_stroke_circle_minimal(canvas, cx, cy, radius, scale, hovered);
+    if (ui && ui->has_icon_close) {
+        const float box = radius * (hovered ? 1.62f : 1.55f);
+        libregpu_draw_image_fit(canvas, &ui->icon_close, 1, cx, cy,
+                             box, box, nk_rgba(255, 255, 255, 255));
+        return;
+    }
     nk_stroke_line(canvas, cx - arm, cy - arm, cx + arm, cy + arm, thick, ink);
     nk_stroke_line(canvas, cx - arm, cy + arm, cx + arm, cy - arm, thick, ink);
 }
 
+static void libregpu_draw_info_mark(struct nk_context *ctx,
+                                 struct nk_command_buffer *canvas,
+                                 float cx, float cy, float radius,
+                                 int hovered)
+{
+    const struct nk_color ink = nk_rgba(230, 233, 240, 210);
+
+    libregpu_stroke_circle_minimal(canvas, cx, cy, radius, 1.0f, hovered);
+    if (ctx->style.font) {
+        nk_draw_text(canvas,
+                     nk_rect(cx - 3.0f, cy - 9.0f, radius * 2.0f, 18.0f),
+                     "i", 1, ctx->style.font, ink,
+                     nk_rgba(0, 0, 0, 0));
+    }
+}
 
 static void libregpu_draw_ripple(struct nk_command_buffer *canvas,
                               float cx, float cy, float scale,
@@ -2177,16 +2278,17 @@ static void libregpu_draw_profile_slot(struct nk_context *ctx,
     scale = radius / 22.0f;
 
     if (profile->has_thumbnail) {
-        libregpu_draw_image(canvas, &profile->thumbnail, 1,
-                         cx, cy, radius, nk_rgba(255, 255, 255, 255));
+        const float box = radius * 1.66f;
+        libregpu_draw_image_fit(canvas, &profile->thumbnail, 1, cx, cy,
+                             box, box, nk_rgba(255, 255, 255, 255));
         libregpu_stroke_circle_minimal(canvas, cx, cy, radius, scale, hovered);
         return;
     }
 
-    
-
     rect = libregpu_circle_rect(cx, cy, radius);
     fill = libregpu_profile_palette[profile->id % 8u];
+    if (!profile->has_thumbnail)
+        fill.a = 255u;
 
     nk_fill_circle(canvas, rect, fill);
     libregpu_stroke_circle_minimal(canvas, cx, cy, radius, scale, hovered);
@@ -2212,9 +2314,9 @@ static void libregpu_draw_logo_placeholder(struct nk_context *ctx,
     const struct nk_rect rect = libregpu_circle_rect(cx, cy, radius);
     const float scale = radius / 58.0f;
 
-    nk_fill_circle(canvas, rect, nk_rgba(34, 38, 46, 255));
+    nk_fill_circle(canvas, rect, nk_rgba(34, 38, 46, 180));
     nk_stroke_circle(canvas, rect, 2.0f * scale,
-                     nk_rgba(150, 160, 180, 200));
+                     nk_rgba(150, 160, 180, 180));
     nk_stroke_circle(canvas, libregpu_circle_rect(cx, cy, radius * 0.58f),
                      1.2f * scale, nk_rgba(120, 130, 150, 160));
 
@@ -2239,13 +2341,16 @@ static void libregpu_draw_context_menu(struct nk_context *ctx,
                                    float window_h)
 {
     const float menu_w = 116.0f;
-    const float menu_h = 36.0f;
+    const float menu_h = 72.0f;
+    const float row_h = 30.0f;
     float x = ui->context_x;
     float y = ui->context_y;
     struct nk_rect menu_rect;
+    struct nk_rect edit_rect;
     struct nk_rect delete_rect;
     const struct nk_vec2 mouse = ctx->input.mouse.pos;
-    int hovering;
+    int hovering_edit;
+    int hovering_delete;
 
     if (!ui->context_open) return;
 
@@ -2255,25 +2360,43 @@ static void libregpu_draw_context_menu(struct nk_context *ctx,
     if (y < 4.0f) y = 4.0f;
 
     menu_rect = nk_rect(x, y, menu_w, menu_h);
-    delete_rect = nk_rect(x + 3.0f, y + 3.0f, menu_w - 6.0f, menu_h - 6.0f);
-    hovering = (mouse.x >= menu_rect.x && mouse.x <= menu_rect.x + menu_rect.w &&
-                mouse.y >= menu_rect.y && mouse.y <= menu_rect.y + menu_rect.h);
+    edit_rect = nk_rect(x + 3.0f, y + 3.0f, menu_w - 6.0f, row_h);
+    delete_rect = nk_rect(x + 3.0f, y + 3.0f + row_h + 3.0f,
+                          menu_w - 6.0f, row_h);
+    hovering_edit =
+        mouse.x >= edit_rect.x && mouse.x <= edit_rect.x + edit_rect.w &&
+        mouse.y >= edit_rect.y && mouse.y <= edit_rect.y + edit_rect.h;
+    hovering_delete =
+        mouse.x >= delete_rect.x && mouse.x <= delete_rect.x + delete_rect.w &&
+        mouse.y >= delete_rect.y && mouse.y <= delete_rect.y + delete_rect.h;
 
     nk_fill_rect(canvas, menu_rect, 5.0f,
                  nk_rgba(26, 28, 33, 238));
+    nk_fill_rect(canvas, edit_rect, 4.0f,
+                 hovering_edit ? nk_rgba(42, 55, 70, 250)
+                               : nk_rgba(42, 44, 49, 245));
     nk_fill_rect(canvas, delete_rect, 4.0f,
-                 hovering ? nk_rgba(86, 42, 45, 250)
-                          : nk_rgba(42, 44, 49, 245));
+                 hovering_delete ? nk_rgba(86, 42, 45, 250)
+                                 : nk_rgba(42, 44, 49, 245));
 
     if (ctx->style.font) {
         nk_draw_text(canvas,
                      nk_rect(x + 13.0f, y + 7.0f, menu_w - 26.0f, 22.0f),
+                     "Edit", 4, ctx->style.font,
+                     nk_rgba(250, 250, 250, 255),
+                     nk_rgba(0, 0, 0, 0));
+        nk_draw_text(canvas,
+                     nk_rect(x + 13.0f, y + 39.0f, menu_w - 26.0f, 22.0f),
                      "Delete", 6, ctx->style.font,
                      nk_rgba(250, 250, 250, 255),
                      nk_rgba(0, 0, 0, 0));
     }
 
-    if (libregpu_mouse_clicked_rect(ctx, NK_BUTTON_LEFT, delete_rect)) {
+    if (libregpu_mouse_clicked_rect(ctx, NK_BUTTON_LEFT, edit_rect)) {
+        const uint32_t id = ui->context_profile_id;
+        ui->context_open = 0;
+        libregpu_open_config_edit(ui, id);
+    } else if (libregpu_mouse_clicked_rect(ctx, NK_BUTTON_LEFT, delete_rect)) {
         const int index = libregpu_profile_index_by_id(ui, ui->context_profile_id);
         if (index >= 0 && ui->hooks.delete_profile &&
             ui->hooks.delete_profile(ui->hooks.userdata,
@@ -2281,7 +2404,6 @@ static void libregpu_draw_context_menu(struct nk_context *ctx,
             libregpu_remove_profile_at(ui, (size_t)index);
             ui->context_open = 0;
         }
-        
 
     } else if (nk_input_is_mouse_click_in_rect(&ctx->input, NK_BUTTON_LEFT,
                                                 nk_rect(0, 0, window_w, window_h)) ||
@@ -2298,10 +2420,6 @@ static void libregpu_draw_context_menu(struct nk_context *ctx,
     }
 }
 
-
-
-
-
 static void libregpu_process_orbit_input(struct nk_context *ctx,
                                       LibreGPUUI *ui,
                                       float logo_x,
@@ -2312,7 +2430,7 @@ static void libregpu_process_orbit_input(struct nk_context *ctx,
 {
     float point_x[7];
     float point_y[7];
-    float logo_radius = 58.0f * scale;
+    float logo_radius = 46.2f * scale;
     float control_radius = 22.0f * scale;
     int i;
 
@@ -2324,9 +2442,10 @@ static void libregpu_process_orbit_input(struct nk_context *ctx,
     if (ui->config_open || ui->quit_requested) return;
 
     if (ui->context_open) {
-        
+
         return;
     }
+    if (ui->info_open) return;
 
     if (libregpu_mouse_clicked_circle(ctx, NK_BUTTON_LEFT,
                                    point_x[0], point_y[0], control_radius)) {
@@ -2354,7 +2473,7 @@ static void libregpu_process_orbit_input(struct nk_context *ctx,
             ui->current_page * LIBREGPU_PROFILE_PAGE_SIZE + (size_t)i;
         const float x = point_x[i + 1];
         const float y = point_y[i + 1];
-        const float r = 22.0f * scale;
+        const float r = 44.0f * scale;
 
         if (profile_index >= ui->profile_count) continue;
 
@@ -2385,10 +2504,6 @@ static void libregpu_process_orbit_input(struct nk_context *ctx,
     (void)window_h;
 }
 
-
-
-
-
 static void libregpu_draw_orbit(struct nk_context *ctx,
                              struct nk_command_buffer *canvas,
                              LibreGPUUI *ui,
@@ -2414,7 +2529,7 @@ static void libregpu_draw_orbit(struct nk_context *ctx,
 
     logo_x = window_w * 0.32f;
     logo_y = window_h * 0.50f;
-    logo_radius = 58.0f * scale;
+    logo_radius = 46.2f * scale;
     control_radius = 22.0f * scale;
     logo_draw_x = logo_x + libregpu_logo_shake_offset_x(ui, scale);
     logo_draw_y = logo_y + libregpu_logo_shake_offset_y(ui, scale);
@@ -2424,24 +2539,20 @@ static void libregpu_draw_orbit(struct nk_context *ctx,
         point_y[i] = logo_y + libregpu_orbit_offsets[i].y * scale;
     }
 
-    
     if (ui->ripple_active)
         libregpu_draw_ripple(canvas, logo_x, logo_y, scale, ui->ripple_elapsed);
 
-    
-
     if (ui->has_logo) {
-        libregpu_draw_image(canvas, &ui->logo, 1,
-                         logo_draw_x, logo_draw_y, logo_radius,
-                         nk_rgba(255, 255, 255, 255));
+        const float box = logo_radius * 1.66f;
+        libregpu_draw_image_fit(canvas, &ui->logo, 1,
+                             logo_draw_x, logo_draw_y, box, box,
+                             nk_rgba(255, 255, 255, 255));
         libregpu_stroke_circle_minimal(canvas, logo_draw_x, logo_draw_y,
                                     logo_radius, scale, 0);
     } else {
         libregpu_draw_logo_placeholder(ctx, canvas,
                                     logo_draw_x, logo_draw_y, logo_radius);
     }
-
-    
 
     if (ui->page_animating) {
         const float t = libregpu_smoothstep(ui->page_elapsed /
@@ -2458,12 +2569,12 @@ static void libregpu_draw_orbit(struct nk_context *ctx,
             if (old_index < ui->profile_count) {
                 libregpu_draw_profile_slot(ctx, canvas, &ui->profiles[old_index],
                                         x, base_y - shift * t,
-                                        22.0f * scale, 0);
+                                        44.0f * scale, 0);
             }
             if (new_index < ui->profile_count) {
                 libregpu_draw_profile_slot(ctx, canvas, &ui->profiles[new_index],
                                         x, base_y + shift * (1.0f - t),
-                                        22.0f * scale, 0);
+                                        44.0f * scale, 0);
             }
         }
     } else {
@@ -2472,7 +2583,7 @@ static void libregpu_draw_orbit(struct nk_context *ctx,
                 ui->current_page * LIBREGPU_PROFILE_PAGE_SIZE + (size_t)i;
             const float x = point_x[i + 1];
             const float y = point_y[i + 1];
-            const float r = 22.0f * scale;
+            const float r = 44.0f * scale;
             const int hovered =
                 profile_index < ui->profile_count &&
                 libregpu_point_in_circle(mouse.x, mouse.y, x, y, r);
@@ -2484,12 +2595,11 @@ static void libregpu_draw_orbit(struct nk_context *ctx,
         }
     }
 
-    
-    libregpu_draw_close(canvas, point_x[0], point_y[0], control_radius,
+    libregpu_draw_close(canvas, ui, point_x[0], point_y[0], control_radius,
                      scale,
                      libregpu_point_in_circle(mouse.x, mouse.y,
                                            point_x[0], point_y[0], control_radius));
-    libregpu_draw_plus(canvas, point_x[6], point_y[6], control_radius,
+    libregpu_draw_plus(canvas, ui, point_x[6], point_y[6], control_radius,
                     scale,
                     libregpu_point_in_circle(mouse.x, mouse.y,
                                           point_x[6], point_y[6], control_radius));
@@ -2500,10 +2610,6 @@ static void libregpu_draw_orbit(struct nk_context *ctx,
     if (ui->context_open)
         libregpu_draw_context_menu(ctx, canvas, ui, window_w, window_h);
 }
-
-
-
-
 
 static void libregpu_save_profile_from_config(LibreGPUUI *ui)
 {
@@ -2523,6 +2629,56 @@ static void libregpu_save_profile_from_config(LibreGPUUI *ui)
 
     if (ui->path_invalid || ui->fps_invalid) return;
 
+    candidate = *ui->settings;
+    (void)snprintf(candidate.game_path, sizeof candidate.game_path,
+                   "%s", ui->path_text);
+    candidate.game_selected = true;
+    candidate.config.target_loops_per_second = (double)fps;
+
+    memset(&created, 0, sizeof(created));
+    memset(error, 0, sizeof(error));
+
+    if (ui->editing_profile_id != 0) {
+        const int index = libregpu_profile_index_by_id(ui, ui->editing_profile_id);
+
+        if (index < 0) {
+            (void)snprintf(ui->backend_error, sizeof(ui->backend_error),
+                           "%s", "Profile no longer exists");
+            return;
+        }
+        if (!ui->hooks.update_profile) {
+            (void)snprintf(ui->backend_error, sizeof(ui->backend_error),
+                           "%s", "Profile update is not connected");
+            return;
+        }
+        if (!ui->hooks.update_profile(ui->hooks.userdata,
+                                      ui->editing_profile_id,
+                                      &candidate,
+                                      &created,
+                                      error, sizeof(error)) ||
+            created.id != ui->editing_profile_id) {
+            if (error[0] != '\0') {
+                (void)snprintf(ui->backend_error, sizeof(ui->backend_error),
+                               "%s", error);
+            } else {
+                (void)snprintf(ui->backend_error, sizeof(ui->backend_error),
+                               "%s", "Could not update profile");
+            }
+            return;
+        }
+
+        created.thumbnail = ui->profiles[index].thumbnail;
+        created.has_thumbnail = ui->profiles[index].has_thumbnail;
+        (void)snprintf(created.game_path, sizeof created.game_path,
+                       "%s", candidate.game_path);
+        created.config = candidate.config;
+        created.name[sizeof created.name - 1] = '\0';
+        ui->profiles[index] = created;
+        *ui->settings = candidate;
+        libregpu_close_config(ui);
+        return;
+    }
+
     if (!ui->hooks.save_profile) {
         (void)snprintf(ui->backend_error, sizeof(ui->backend_error),
                        "%s", "Profile save is not connected");
@@ -2534,15 +2690,6 @@ static void libregpu_save_profile_from_config(LibreGPUUI *ui)
                        "%s", "Profile capacity reached");
         return;
     }
-
-    candidate = *ui->settings;
-    (void)snprintf(candidate.game_path, sizeof candidate.game_path,
-                   "%s", ui->path_text);
-    candidate.game_selected = true;
-    candidate.config.target_loops_per_second = (double)fps;
-
-    memset(&created, 0, sizeof(created));
-    memset(error, 0, sizeof(error));
 
     if (!ui->hooks.save_profile(ui->hooks.userdata,
                                 &candidate,
@@ -2564,18 +2711,14 @@ static void libregpu_save_profile_from_config(LibreGPUUI *ui)
         return;
     }
 
-    
-
     (void)snprintf(created.game_path, sizeof created.game_path,
                    "%s", candidate.game_path);
     created.config = candidate.config;
     created.name[sizeof created.name - 1] = '\0';
     ui->profiles[ui->profile_count++] = created;
 
-    
     *ui->settings = candidate;
 
-    
     ui->current_page = (ui->profile_count - 1) / LIBREGPU_PROFILE_PAGE_SIZE;
     ui->target_page = ui->current_page;
     ui->page_animating = 0;
@@ -2594,35 +2737,70 @@ static void libregpu_draw_config_window(struct nk_context *ctx,
     const float dialog_y = fmaxf(0.0f, (window_h - dialog_h) * 0.5f);
     const struct nk_rect bounds = nk_rect(dialog_x, dialog_y, dialog_w, dialog_h);
     const struct nk_style_window old_window_style = ctx->style.window;
+    const int creating = ui->editing_profile_id == 0;
+    struct nk_command_buffer *canvas = NULL;
+    float title_icon_h = 0.0f;
+    float title_icon_w = 0.0f;
+    float header_padding_x = 0.0f;
+    float header_padding_y = 0.0f;
+    float header_label_padding_y = 0.0f;
     char old_path[LIBREGPU_UI_PATH_MAX];
     char old_fps[LIBREGPU_FPS_CAP];
     int save_clicked = 0;
     int cancel_clicked = 0;
 
-    
-
-    ctx->style.window.background = nk_rgba(29, 32, 38, 222);
+    ctx->style.window.background = nk_rgba(0, 0, 0, 0);
     ctx->style.window.fixed_background =
-        nk_style_item_color(nk_rgba(29, 32, 38, 222));
+        nk_style_item_color(nk_rgba(0, 0, 0, 0));
     ctx->style.window.header.normal =
-        nk_style_item_color(nk_rgba(29, 32, 38, 222));
+        nk_style_item_color(nk_rgba(0, 0, 0, 0));
     ctx->style.window.header.hover =
-        nk_style_item_color(nk_rgba(37, 40, 47, 230));
+        nk_style_item_color(nk_rgba(0, 0, 0, 0));
     ctx->style.window.header.active =
-        nk_style_item_color(nk_rgba(37, 40, 47, 238));
+        nk_style_item_color(nk_rgba(0, 0, 0, 0));
     ctx->style.window.border_color = nk_rgba(230, 233, 240, 105);
     ctx->style.window.border = 1.0f;
     ctx->style.window.rounding = 8.0f;
     ctx->style.window.padding = nk_vec2(15.0f, 12.0f);
     ctx->style.window.spacing = nk_vec2(8.0f, 6.0f);
 
-    if (nk_begin(ctx, "LibreGPU", bounds,
+    if (creating) {
+        ctx->style.window.header.label_normal = nk_rgba(255, 0, 0, 255);
+        ctx->style.window.header.label_hover = nk_rgba(255, 0, 0, 255);
+        ctx->style.window.header.label_active = nk_rgba(255, 0, 0, 255);
+    } else {
+        ctx->style.window.header.label_normal = nk_rgba(255, 255, 255, 255);
+        ctx->style.window.header.label_hover = nk_rgba(255, 255, 255, 255);
+        ctx->style.window.header.label_active = nk_rgba(255, 255, 255, 255);
+    }
+
+    if (creating && ui->has_icon_warning &&
+        ui->icon_warning.w > 0 && ui->icon_warning.h > 0) {
+        const float font_h = ctx->style.font ? ctx->style.font->height : 15.0f;
+        title_icon_h = font_h * 1.15f;
+        title_icon_w = title_icon_h * (float)ui->icon_warning.w /
+                       (float)ui->icon_warning.h;
+        ctx->style.window.header.label_padding.x = title_icon_w + 4.0f;
+    }
+
+    header_padding_x = ctx->style.window.header.padding.x;
+    header_padding_y = ctx->style.window.header.padding.y;
+    header_label_padding_y = ctx->style.window.header.label_padding.y;
+
+    if (nk_begin(ctx,
+                 creating
+                     ? "Lower Game Settings are Recommended"
+                     : "Edit Profile",
+                 bounds,
                  NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_NO_SCROLLBAR)) {
+        canvas = nk_window_get_canvas(ctx);
+
         (void)snprintf(old_path, sizeof(old_path), "%s", ui->path_text);
         (void)snprintf(old_fps, sizeof(old_fps), "%s", ui->fps_text);
 
         nk_layout_row_dynamic(ctx, 19.0f, 1);
-        nk_label(ctx, "Game File Path", NK_TEXT_LEFT);
+        nk_label_colored(ctx, "Game File Path", NK_TEXT_LEFT,
+                         nk_rgba(255, 255, 255, 255));
 
         nk_layout_row_begin(ctx, NK_DYNAMIC, 32.0f, 2);
         nk_layout_row_push(ctx, 0.78f);
@@ -2652,11 +2830,12 @@ static void libregpu_draw_config_window(struct nk_context *ctx,
         if (ui->path_invalid) {
             nk_layout_row_dynamic(ctx, 18.0f, 1);
             nk_label_colored(ctx, "File not found", NK_TEXT_LEFT,
-                              nk_rgba(255, 105, 105, 255));
+                              nk_rgba(255, 0, 0, 255));
         }
 
         nk_layout_row_dynamic(ctx, 19.0f, 1);
-        nk_label(ctx, "Limit FPS Count", NK_TEXT_LEFT);
+        nk_label_colored(ctx, "Limit FPS Count", NK_TEXT_LEFT,
+                         nk_rgba(255, 255, 255, 255));
 
         nk_layout_row_dynamic(ctx, 32.0f, 1);
         (void)nk_edit_string_zero_terminated(ctx, NK_EDIT_FIELD,
@@ -2670,13 +2849,13 @@ static void libregpu_draw_config_window(struct nk_context *ctx,
         if (ui->fps_invalid) {
             nk_layout_row_dynamic(ctx, 18.0f, 1);
             nk_label_colored(ctx, "Invalid FPS", NK_TEXT_LEFT,
-                              nk_rgba(255, 105, 105, 255));
+                              nk_rgba(255, 255, 255, 255));
         }
 
         if (ui->backend_error[0] != '\0') {
             nk_layout_row_dynamic(ctx, 18.0f, 1);
             nk_label_colored(ctx, ui->backend_error, NK_TEXT_LEFT,
-                              nk_rgba(255, 190, 105, 255));
+                              nk_rgba(255, 255, 255, 255));
         }
 
         nk_layout_row_dynamic(ctx, 32.0f, 2);
@@ -2684,6 +2863,19 @@ static void libregpu_draw_config_window(struct nk_context *ctx,
         save_clicked = nk_button_label(ctx, "Save");
     }
     nk_end(ctx);
+
+    if (creating && canvas && title_icon_w > 0.0f) {
+        const float font_h = ctx->style.font ? ctx->style.font->height : 15.0f;
+        const float header_h = font_h + 2.0f * header_padding_y +
+                               2.0f * header_label_padding_y;
+        const float icon_cx = bounds.x + header_padding_x +
+                              title_icon_w * 0.5f + 1.0f;
+        const float icon_cy = bounds.y + header_h * 0.5f;
+        libregpu_draw_image_fit(canvas, &ui->icon_warning, 1,
+                             icon_cx, icon_cy,
+                             title_icon_w, title_icon_h,
+                             nk_rgba(255, 255, 255, 255));
+    }
 
     ctx->style.window = old_window_style;
 
@@ -2694,9 +2886,61 @@ static void libregpu_draw_config_window(struct nk_context *ctx,
     }
 }
 
+static void libregpu_draw_info_window(struct nk_context *ctx,
+                                   LibreGPUUI *ui,
+                                   float window_w,
+                                   float window_h)
+{
+    const float dialog_w = fminf(560.0f, fmaxf(1.0f, window_w - 24.0f));
+    const float dialog_h = fminf(470.0f, fmaxf(1.0f, window_h - 24.0f));
+    const float dialog_x = fmaxf(0.0f, (window_w - dialog_w) * 0.5f);
+    const float dialog_y = fmaxf(0.0f, (window_h - dialog_h) * 0.5f);
+    const struct nk_rect bounds = nk_rect(dialog_x, dialog_y, dialog_w, dialog_h);
+    const struct nk_style_window old_window_style = ctx->style.window;
+    char body[2048];
+    int close_clicked = 0;
 
+    body[0] = '\0';
+    if (ui->hooks.fill_diagnostics) {
+        (void)ui->hooks.fill_diagnostics(ui->hooks.userdata, body, sizeof(body));
+    }
+    if (body[0] == '\0') {
+        (void)snprintf(body, sizeof(body),
+                       "LIBREGPU %s (%s, %s)\n"
+                       "The core runs on the simulated backend. Real GPU execution "
+                       "is available through the optional OpenGL targets.\n",
+                       LIBREGPU_VERSION, LIBREGPU_STEP_LABEL, LIBREGPU_RELEASE);
+    }
+    body[sizeof(body) - 1] = '\0';
 
+    ctx->style.window.background = nk_rgba(29, 32, 38, 236);
+    ctx->style.window.fixed_background =
+        nk_style_item_color(nk_rgba(29, 32, 38, 236));
+    ctx->style.window.header.normal =
+        nk_style_item_color(nk_rgba(29, 32, 38, 236));
+    ctx->style.window.header.hover =
+        nk_style_item_color(nk_rgba(37, 40, 47, 240));
+    ctx->style.window.header.active =
+        nk_style_item_color(nk_rgba(37, 40, 47, 246));
+    ctx->style.window.border_color = nk_rgba(230, 233, 240, 105);
+    ctx->style.window.border = 1.0f;
+    ctx->style.window.rounding = 8.0f;
+    ctx->style.window.padding = nk_vec2(16.0f, 13.0f);
+    ctx->style.window.spacing = nk_vec2(8.0f, 6.0f);
 
+    if (nk_begin(ctx, "Compatibility and diagnostics", bounds,
+                 NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_NO_SCROLLBAR)) {
+        nk_layout_row_dynamic(ctx, dialog_h - 112.0f, 1);
+        nk_label_wrap(ctx, body);
+        nk_layout_row_dynamic(ctx, 32.0f, 2);
+        (void)nk_label(ctx, "", NK_TEXT_LEFT);
+        if (nk_button_label(ctx, "Close")) close_clicked = 1;
+    }
+    nk_end(ctx);
+
+    ctx->style.window = old_window_style;
+    if (close_clicked) libregpu_close_info(ui);
+}
 
 void libregpu_ui_draw(struct nk_context *ctx,
                    LibreGPUUI *ui,
@@ -2715,8 +2959,6 @@ void libregpu_ui_draw(struct nk_context *ctx,
 
     libregpu_update_animations(ui, delta_seconds);
 
-    
-
     ctx->style.window.background = nk_rgba(0, 0, 0, 0);
     ctx->style.window.fixed_background = nk_style_item_color(nk_rgba(0, 0, 0, 0));
     ctx->style.window.border = 0.0f;
@@ -2734,68 +2976,11 @@ void libregpu_ui_draw(struct nk_context *ctx,
     nk_end(ctx);
     ctx->style.window = old_window_style;
 
-    
     if (ui->config_open)
         libregpu_draw_config_window(ctx, ui, window_width, window_height);
+    else if (ui->info_open)
+        libregpu_draw_info_window(ctx, ui, window_width, window_height);
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 #define APP_DEFAULT_WIDTH   1080
 #define APP_DEFAULT_HEIGHT  720
@@ -2808,10 +2993,6 @@ void libregpu_ui_draw(struct nk_context *ctx,
 #define APP_TOAST_SECONDS   4.0
 #define APP_TARGET_FPS      60.0
 
-
-
-
-
 #define APP_ORBIT_OPACITY   0.55f
 
 #define APP_RESIZE_LEFT     1
@@ -2819,16 +3000,34 @@ void libregpu_ui_draw(struct nk_context *ctx,
 #define APP_RESIZE_TOP      4
 #define APP_RESIZE_BOTTOM   8
 
+#define APP_ART_SIZE        768
+#define APP_PROFILE_ART     256
+
+typedef struct AppProfileIcon {
+    uint32_t     id;
+    char         path[LIBREGPU_UI_PATH_MAX];
+    SDL_Texture *texture;
+    int          used;
+} AppProfileIcon;
+
 typedef struct LibreGPUApp {
     SDL_Window *window;
     SDL_Renderer *renderer;
     LibreGPUNkSdl2 nk;
+
+    SDL_Texture *logo_texture;
+    SDL_Texture *icon_add_texture;
+    SDL_Texture *icon_close_texture;
+    SDL_Texture *icon_warning_texture;
+    AppProfileIcon profile_icons[LIBREGPU_UI_MAX_PROFILES];
 
     LibreGPULauncherSettings settings;
     LibreGPUUI ui;
     LibreGPUProfileStore profiles;
 
     int running;
+
+    int window_has_alpha;
 
     int dragging;
     int resizing;
@@ -2855,10 +3054,6 @@ typedef struct LibreGPUApp {
     char picker_error[160];
 } LibreGPUApp;
 
-
-
-
-
 static double app_now(void)
 {
     const Uint64 frequency = SDL_GetPerformanceFrequency();
@@ -2874,34 +3069,60 @@ static void app_toast(LibreGPUApp *app, const char *text)
     app->toast_time = APP_TOAST_SECONDS;
 }
 
+static void app_minimize_window(void *userdata)
+{
+    LibreGPUApp *app = (LibreGPUApp *)userdata;
 
+    if (app && app->window) SDL_MinimizeWindow(app->window);
+}
 
+static void app_restore_window(void *userdata)
+{
+    LibreGPUApp *app = (LibreGPUApp *)userdata;
 
+    if (!app || !app->window) return;
+    SDL_RestoreWindow(app->window);
+    SDL_RaiseWindow(app->window);
+}
+
+static int app_launch_is_runnable(void *userdata, const char *path)
+{
+    (void)userdata;
+    return libregpu_path_is_executable_file(path);
+}
+
+static int app_launch_game(void *userdata, const char *path,
+                           char *error_text, size_t error_capacity)
+{
+    (void)userdata;
+    return libregpu_launch_detached(path, error_text, error_capacity);
+}
 
 static void app_launch_profile(void *userdata,
                                const LibreGPULauncherSettings *settings)
 {
     LibreGPUApp *app = (LibreGPUApp *)userdata;
-    char error[200];
-    char message[320];
+    LibreGPULaunchHost host;
+    char message[200];
+    char toast[320];
 
     if (!app || !settings) return;
 
-    if (!libregpu_path_is_executable_file(settings->game_path)) {
-        app_toast(app, "File not found or not executable");
-        return;
-    }
-
-    if (!libregpu_launch_detached(settings->game_path, error, sizeof(error))) {
-        app_toast(app, error);
-        return;
-    }
+    host.userdata = app;
+    host.is_runnable = app_launch_is_runnable;
+    host.minimize = app_minimize_window;
+    host.restore = app_restore_window;
+    host.launch = app_launch_game;
 
     
+    if (!ui_launch_game(&host, settings->game_path, message, sizeof(message))) {
+        app_toast(app, message);
+        return;
+    }
 
-    (void)snprintf(message, sizeof(message), "Launched %.310s",
+    (void)snprintf(toast, sizeof(toast), "Launched %.310s",
                    libregpu_path_basename(settings->game_path));
-    app_toast(app, message);
+    app_toast(app, toast);
 }
 
 static int app_pick_executable(void *userdata,
@@ -2911,7 +3132,6 @@ static int app_pick_executable(void *userdata,
     (void)out_path;
     (void)out_capacity;
     if (!app) return 0;
-    
 
     app->picker_requested = 1;
     return 0;
@@ -2952,6 +3172,80 @@ static int app_save_profile(void *userdata,
     return 1;
 }
 
+static int app_update_profile(void *userdata, uint32_t profile_id,
+                              const LibreGPULauncherSettings *settings,
+                              LibreGPUUIProfile *out_profile,
+                              char *error_text, size_t error_capacity)
+{
+    LibreGPUApp *app = (LibreGPUApp *)userdata;
+    LibreGPUStoredProfile stored;
+    int fps;
+
+    if (!app || !settings || !out_profile) return 0;
+
+    fps = (int)(settings->config.target_loops_per_second + 0.5);
+    memset(&stored, 0, sizeof(stored));
+    if (!libregpu_profiles_update(&app->profiles, profile_id,
+                               settings->game_path, fps,
+                               &stored, error_text, error_capacity))
+        return 0;
+
+    memset(out_profile, 0, sizeof(*out_profile));
+    out_profile->id = stored.id;
+    out_profile->config = settings->config;
+    out_profile->config.target_loops_per_second = (double)stored.fps;
+    (void)snprintf(out_profile->game_path, sizeof(out_profile->game_path),
+                   "%s", stored.path);
+    (void)snprintf(out_profile->name, sizeof(out_profile->name),
+                   "%s", stored.name);
+    out_profile->has_thumbnail = 0;
+    return 1;
+}
+
+static int app_fill_diagnostics(void *userdata, char *text, size_t capacity)
+{
+    LibreGPUApp *app = (LibreGPUApp *)userdata;
+    char interposer[LIBREGPU_LAUNCH_PATH_MAX];
+    const char *platform;
+    int have_interposer;
+
+    if (!app || !text || capacity == 0) return 0;
+    have_interposer = libregpu_interposer_path(interposer, sizeof interposer);
+    platform = SDL_GetPlatform();
+
+    (void)snprintf(text, capacity,
+        "LIBREGPU %s (%s, %s)\n"
+        "\n"
+        "Compatibility\n"
+        "  Real GPU execution   OpenGL 2.1 through the optional M3 backend\n"
+        "  Game interposition   POSIX LD_PRELOAD at the presentation boundary\n"
+        "  Draw-call capture    not implemented; games are forwarded unchanged\n"
+        "  Camera Update        exact whole-pixel 2D pan only (off by default)\n"
+        "  GPU timing           GL_ARB_sync fence completion; the GL timer query\n"
+        "                       is rejected when the driver returns a sentinel\n"
+        "\n"
+        "This installation\n"
+        "  Profiles             %lu stored in %s\n"
+        "  Interposer           %s\n"
+        "  Host                 %s, %d CPU(s), %d MiB RAM\n"
+        "\n"
+        "Known good on the reference machine\n"
+        "  prboom-plus + Freedoom (-vidmode gl)\n"
+        "  DDNet (gfx_backend OpenGL)\n"
+        "  Controlled 960x540 scene (make gpu-check)\n"
+        "\n"
+        "Limits\n"
+        "  Intel Gen5 has no hardware Vulkan, so Vulkan is not a hardware path here.\n"
+        "  The interposer is POSIX-only. Launchers do not optimize arbitrary engines.",
+        LIBREGPU_VERSION, LIBREGPU_STEP_LABEL, LIBREGPU_RELEASE,
+        (unsigned long)libregpu_profiles_count(&app->profiles),
+        libregpu_profiles_file_path(&app->profiles),
+        have_interposer ? interposer : "not found",
+        platform ? platform : "unknown",
+        SDL_GetCPUCount(), SDL_GetSystemRAM());
+    return 1;
+}
+
 static int app_delete_profile(void *userdata, uint32_t profile_id)
 {
     LibreGPUApp *app = (LibreGPUApp *)userdata;
@@ -2964,10 +3258,6 @@ static void app_quit(void *userdata)
     LibreGPUApp *app = (LibreGPUApp *)userdata;
     if (app) app->running = 0;
 }
-
-
-
-
 
 static void app_load_profiles(LibreGPUApp *app)
 {
@@ -3003,10 +3293,6 @@ static void app_load_profiles(LibreGPUApp *app)
     libregpu_ui_set_profiles(&app->ui, loaded, count);
     free(loaded);
 }
-
-
-
-
 
 static void app_picker_reload(LibreGPUApp *app)
 {
@@ -3074,10 +3360,6 @@ static void app_picker_up(LibreGPUApp *app)
         app_picker_navigate(app, parent);
 }
 
-
-
-
-
 static void app_draw_picker(LibreGPUApp *app, int window_w, int window_h)
 {
     struct nk_context *ctx = &app->nk.ctx;
@@ -3102,9 +3384,9 @@ static void app_draw_picker(LibreGPUApp *app, int window_w, int window_h)
     next_dir[0] = '\0';
     chosen_path[0] = '\0';
 
-    ctx->style.window.background = nk_rgba(29, 32, 38, 248);
+    ctx->style.window.background = nk_rgba(29, 32, 38, 180);
     ctx->style.window.fixed_background =
-        nk_style_item_color(nk_rgba(29, 32, 38, 248));
+        nk_style_item_color(nk_rgba(29, 32, 38, 180));
     ctx->style.window.border_color = nk_rgba(230, 233, 240, 110);
     ctx->style.window.border = 1.0f;
     ctx->style.window.rounding = 8.0f;
@@ -3119,7 +3401,7 @@ static void app_draw_picker(LibreGPUApp *app, int window_w, int window_h)
         if (app->picker_error[0] != '\0') {
             nk_layout_row_dynamic(ctx, 18.0f, 1);
             nk_label_colored(ctx, app->picker_error, NK_TEXT_LEFT,
-                             nk_rgba(255, 120, 120, 255));
+                             nk_rgba(255, 255, 255, 255));
         }
 
         nk_layout_row_dynamic(ctx, 28.0f, 4);
@@ -3204,10 +3486,6 @@ static void app_draw_picker(LibreGPUApp *app, int window_w, int window_h)
     if (cancel) app->picker_open = 0;
 }
 
-
-
-
-
 static void app_draw_toast(LibreGPUApp *app, int window_w, int window_h)
 {
     struct nk_context *ctx = &app->nk.ctx;
@@ -3235,10 +3513,6 @@ static void app_draw_toast(LibreGPUApp *app, int window_w, int window_h)
 
     ctx->style.window = saved_style;
 }
-
-
-
-
 
 static void app_capture_start(LibreGPUApp *app)
 {
@@ -3357,10 +3631,6 @@ static void app_end_drag_or_resize(LibreGPUApp *app)
     SDL_CaptureMouse(SDL_FALSE);
 }
 
-
-
-
-
 static void app_handle_event(LibreGPUApp *app, const SDL_Event *event)
 {
     switch (event->type) {
@@ -3375,9 +3645,12 @@ static void app_handle_event(LibreGPUApp *app, const SDL_Event *event)
                 return;
             }
             if (app->ui.config_open) {
-                
-
-
+                libregpu_close_config(&app->ui);
+                return;
+            }
+            if (app->ui.info_open) {
+                libregpu_close_info(&app->ui);
+                return;
             }
             app->running = 0;
             return;
@@ -3426,12 +3699,11 @@ static void app_handle_event(LibreGPUApp *app, const SDL_Event *event)
     libregpu_nk_sdl2_handle_event(&app->nk, event);
 }
 
-
-
-
-
 static int app_create_window(LibreGPUApp *app)
 {
+
+    SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 8);
+
     app->window = SDL_CreateWindow("LibreGPU",
                                    SDL_WINDOWPOS_CENTERED,
                                    SDL_WINDOWPOS_CENTERED,
@@ -3451,10 +3723,12 @@ static int app_create_window(LibreGPUApp *app)
     app->window_opacity = APP_ORBIT_OPACITY;
     (void)SDL_SetWindowOpacity(app->window, app->window_opacity);
 
+    (void)SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengl");
     app->renderer = SDL_CreateRenderer(app->window, -1,
                                        SDL_RENDERER_ACCELERATED |
                                        SDL_RENDERER_PRESENTVSYNC);
     if (!app->renderer) {
+        (void)SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
         app->renderer = SDL_CreateRenderer(app->window, -1,
                                            SDL_RENDERER_SOFTWARE);
     }
@@ -3462,6 +3736,16 @@ static int app_create_window(LibreGPUApp *app)
         fprintf(stderr, "libregpu: could not create a renderer: %s\n",
                 SDL_GetError());
         return 0;
+    }
+
+    {
+        int alpha_bits = 0;
+        if (SDL_GL_GetAttribute(SDL_GL_ALPHA_SIZE, &alpha_bits) == 0 &&
+            alpha_bits >= 8)
+            app->window_has_alpha = 1;
+        
+
+        app->window_has_alpha = 1;
     }
 
     SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND);
@@ -3504,8 +3788,179 @@ static void app_setup_hooks(LibreGPUApp *app, LibreGPUUIHooks *hooks)
     hooks->pick_executable = app_pick_executable;
     hooks->path_is_file = app_path_is_file;
     hooks->save_profile = app_save_profile;
+    hooks->update_profile = app_update_profile;
     hooks->delete_profile = app_delete_profile;
+    hooks->fill_diagnostics = app_fill_diagnostics;
     hooks->quit = app_quit;
+}
+
+static SDL_Texture *app_load_icon(SDL_Renderer *renderer,
+                                  const LibreGPUUiIconRle *icon)
+{
+    unsigned char *rgba;
+    SDL_Texture *texture;
+
+    rgba = libregpu_ui_icon_decode(icon);
+    if (!rgba) return NULL;
+    texture = libregpu_nk_sdl2_make_texture(renderer, rgba,
+                                         (int)icon->width,
+                                         (int)icon->height);
+    free(rgba);
+    return texture;
+}
+
+static struct nk_image app_icon_image(SDL_Texture *texture,
+                                      const LibreGPUUiIconRle *icon)
+{
+    struct nk_image image = nk_image_ptr(texture);
+    image.w = icon->width;
+    image.h = icon->height;
+    image.region[0] = 0;
+    image.region[1] = 0;
+    image.region[2] = icon->width;
+    image.region[3] = icon->height;
+    return image;
+}
+
+static struct nk_image app_texture_image(SDL_Texture *texture)
+{
+    struct nk_image image = nk_image_ptr(texture);
+    int width = 0;
+    int height = 0;
+
+    if (texture) SDL_QueryTexture(texture, NULL, NULL, &width, &height);
+    image.w = (nk_ushort)width;
+    image.h = (nk_ushort)height;
+    image.region[0] = 0;
+    image.region[1] = 0;
+    image.region[2] = (nk_ushort)width;
+    image.region[3] = (nk_ushort)height;
+    return image;
+}
+
+
+static int app_image_has_ink(const LibreGPUImage *image)
+{
+    const size_t pixels = (size_t)image->width * (size_t)image->height;
+
+    if (!image->rgba) return 0;
+    for (size_t i = 0; i < pixels; i++)
+        if (image->rgba[i * 4u + 3u]) return 1;
+    return 0;
+}
+
+static SDL_Texture *app_load_svg_art(SDL_Renderer *renderer, const char *asset,
+                                     unsigned flags, double gamma)
+{
+    char path[LIBREGPU_UI_PATH_MAX];
+    LibreGPUImage image;
+    SDL_Texture *texture;
+
+    if (!renderer || !libregpu_asset_find(asset, path, sizeof(path))) return NULL;
+    if (libregpu_image_load_svg(path, APP_ART_SIZE, APP_ART_SIZE, flags, &image) !=
+        LIBREGPU_OK)
+        return NULL;
+    (void)libregpu_image_trim(&image);
+    if (gamma > 0.0) libregpu_image_gamma(&image, gamma);
+    if (!app_image_has_ink(&image)) {
+        libregpu_image_free(&image);
+        return NULL;
+    }
+    texture = libregpu_nk_sdl2_make_texture(renderer, image.rgba,
+                                         image.width, image.height);
+    libregpu_image_free(&image);
+    return texture;
+}
+
+static SDL_Texture *app_load_game_icon(SDL_Renderer *renderer,
+                                       const char *game_path)
+{
+    char path[LIBREGPU_UI_PATH_MAX];
+    LibreGPUImage image;
+    SDL_Texture *texture;
+
+    if (!renderer || !libregpu_game_icon_find(game_path, path, sizeof(path)))
+        return NULL;
+    if (libregpu_image_load_svg(path, APP_PROFILE_ART, APP_PROFILE_ART,
+                             LIBREGPU_IMAGE_SKIP_BLACK_PLATE, &image) != LIBREGPU_OK)
+        return NULL;
+    (void)libregpu_image_trim(&image);
+    if (!app_image_has_ink(&image)) {
+        libregpu_image_free(&image);
+        return NULL;
+    }
+    texture = libregpu_nk_sdl2_make_texture(renderer, image.rgba,
+                                         image.width, image.height);
+    libregpu_image_free(&image);
+    return texture;
+}
+
+static void app_profile_icons_free(LibreGPUApp *app)
+{
+    for (size_t i = 0; i < LIBREGPU_UI_MAX_PROFILES; i++) {
+        if (app->profile_icons[i].texture)
+            SDL_DestroyTexture(app->profile_icons[i].texture);
+        memset(&app->profile_icons[i], 0, sizeof(app->profile_icons[i]));
+    }
+}
+
+
+
+
+static void app_sync_profile_icons(LibreGPUApp *app)
+{
+    for (size_t i = 0; i < LIBREGPU_UI_MAX_PROFILES; i++)
+        app->profile_icons[i].used = 0;
+
+    for (size_t i = 0; i < app->ui.profile_count; i++) {
+        LibreGPUUIProfile *profile = &app->ui.profiles[i];
+        AppProfileIcon *slot = NULL;
+        const size_t page = i / (size_t)LIBREGPU_PROFILE_PAGE_SIZE;
+
+        if (page != app->ui.current_page && page != app->ui.target_page) {
+            profile->thumbnail = nk_image_id(0);
+            profile->has_thumbnail = 0;
+            continue;
+        }
+
+        for (size_t j = 0; j < LIBREGPU_UI_MAX_PROFILES; j++) {
+            if (app->profile_icons[j].id == profile->id &&
+                !app->profile_icons[j].used) {
+                slot = &app->profile_icons[j];
+                break;
+            }
+        }
+        if (!slot) {
+            for (size_t j = 0; j < LIBREGPU_UI_MAX_PROFILES; j++) {
+                if (!app->profile_icons[j].id && !app->profile_icons[j].used) {
+                    slot = &app->profile_icons[j];
+                    break;
+                }
+            }
+        }
+        if (!slot) continue;
+
+        slot->used = 1;
+        if (slot->id != profile->id ||
+            strcmp(slot->path, profile->game_path) != 0) {
+            if (slot->texture) SDL_DestroyTexture(slot->texture);
+            slot->texture = NULL;
+            slot->id = profile->id;
+            (void)snprintf(slot->path, sizeof(slot->path), "%s",
+                           profile->game_path);
+            slot->texture = app_load_game_icon(app->renderer,
+                                               profile->game_path);
+        }
+        profile->thumbnail = app_texture_image(slot->texture);
+        profile->has_thumbnail = slot->texture != NULL;
+    }
+
+    for (size_t i = 0; i < LIBREGPU_UI_MAX_PROFILES; i++) {
+        AppProfileIcon *slot = &app->profile_icons[i];
+        if (slot->used || !slot->id) continue;
+        if (slot->texture) SDL_DestroyTexture(slot->texture);
+        memset(slot, 0, sizeof(*slot));
+    }
 }
 
 static void app_cleanup(LibreGPUApp *app)
@@ -3514,6 +3969,24 @@ static void app_cleanup(LibreGPUApp *app)
 
     if (app->nk.ready) SDL_StopTextInput();
     libregpu_nk_sdl2_shutdown(&app->nk);
+    app_profile_icons_free(app);
+
+    if (app->logo_texture) {
+        SDL_DestroyTexture(app->logo_texture);
+        app->logo_texture = NULL;
+    }
+    if (app->icon_add_texture) {
+        SDL_DestroyTexture(app->icon_add_texture);
+        app->icon_add_texture = NULL;
+    }
+    if (app->icon_close_texture) {
+        SDL_DestroyTexture(app->icon_close_texture);
+        app->icon_close_texture = NULL;
+    }
+    if (app->icon_warning_texture) {
+        SDL_DestroyTexture(app->icon_warning_texture);
+        app->icon_warning_texture = NULL;
+    }
 
     if (app->renderer) {
         SDL_DestroyRenderer(app->renderer);
@@ -3572,9 +4045,58 @@ int libregpu_ui_host_run(void)
     (void)app_setup_profiles(app);
 
     app_setup_hooks(app, &hooks);
+
+    {
+        char *base = SDL_GetBasePath();
+        if (base) {
+            libregpu_asset_set_base(base);
+            SDL_free(base);
+        }
+    }
+
+    app->logo_texture = app_load_svg_art(app->renderer, "logo.svg",
+                                         LIBREGPU_IMAGE_SKIP_BLACK_PLATE, 0.40);
+    if (!app->logo_texture)
+        app->logo_texture = app_load_icon(app->renderer, &libregpu_ui_icon_logo);
+    app->icon_add_texture = app_load_svg_art(app->renderer, "add.svg",
+                                             LIBREGPU_IMAGE_SKIP_BLACK_PLATE, 0.0);
+    if (!app->icon_add_texture)
+        app->icon_add_texture = app_load_icon(app->renderer, &libregpu_ui_icon_add);
+    app->icon_close_texture = app_load_svg_art(app->renderer, "close.svg",
+                                               LIBREGPU_IMAGE_SKIP_BLACK_PLATE, 0.0);
+    if (!app->icon_close_texture)
+        app->icon_close_texture =
+            app_load_icon(app->renderer, &libregpu_ui_icon_close);
+    app->icon_warning_texture =
+        app_load_icon(app->renderer, &libregpu_ui_icon_warning);
+    if (!app->logo_texture || !app->icon_add_texture ||
+        !app->icon_close_texture || !app->icon_warning_texture)
+        fprintf(stderr,
+                "libregpu: some launcher artwork could not be loaded; "
+                "the fallback marks will be used\n");
+
     libregpu_ui_init(&app->ui, &app->settings, &hooks,
-                  nk_image_id(0), 0);
+                  app->logo_texture
+                      ? app_texture_image(app->logo_texture)
+                      : nk_image_id(0),
+                  app->logo_texture != NULL);
+    libregpu_ui_set_icons(&app->ui,
+                       app->icon_add_texture
+                           ? app_texture_image(app->icon_add_texture)
+                           : nk_image_id(0),
+                       app->icon_add_texture != NULL,
+                       app->icon_close_texture
+                           ? app_texture_image(app->icon_close_texture)
+                           : nk_image_id(0),
+                       app->icon_close_texture != NULL);
+    libregpu_ui_set_warning_icon(&app->ui,
+                              app->icon_warning_texture
+                                  ? app_icon_image(app->icon_warning_texture,
+                                                   &libregpu_ui_icon_warning)
+                                  : nk_image_id(0),
+                              app->icon_warning_texture != NULL);
     app_load_profiles(app);
+    app_sync_profile_icons(app);
 
     previous_time = app_now();
 
@@ -3592,6 +4114,14 @@ int libregpu_ui_host_run(void)
         libregpu_nk_sdl2_input_end(&app->nk);
 
         if (!app->running) break;
+
+        
+
+        if (SDL_GetWindowFlags(app->window) & SDL_WINDOW_MINIMIZED) {
+            SDL_Delay(16);
+            previous_time = app_now();
+            continue;
+        }
 
         SDL_GetRendererOutputSize(app->renderer, &output_w, &output_h);
         if (output_w <= 0 || output_h <= 0) {
@@ -3612,7 +4142,8 @@ int libregpu_ui_host_run(void)
 
         {
             const float target_opacity =
-                (app->picker_open || app->ui.config_open)
+                app->window_has_alpha ||
+                app->picker_open || app->ui.config_open
                     ? 1.0f : APP_ORBIT_OPACITY;
             if (target_opacity != app->window_opacity) {
                 (void)SDL_SetWindowOpacity(app->window, target_opacity);
@@ -3620,7 +4151,7 @@ int libregpu_ui_host_run(void)
             }
         }
 
-        SDL_SetRenderDrawColor(app->renderer, 29, 32, 38, 255);
+        SDL_SetRenderDrawColor(app->renderer, 0, 0, 0, 0);
         SDL_RenderClear(app->renderer);
 
         if (app->picker_open) {
@@ -3633,6 +4164,7 @@ int libregpu_ui_host_run(void)
             SDL_RenderFillRect(app->renderer, &full);
             app_draw_picker(app, output_w, output_h);
         } else {
+            app_sync_profile_icons(app);
             libregpu_ui_draw(&app->nk.ctx, &app->ui,
                           (float)output_w, (float)output_h,
                           (float)delta);
@@ -3663,31 +4195,460 @@ int libregpu_ui_host_run(void)
     return exit_code;
 }
 
+#if !defined(_WIN32)
+static int libregpu_ui_test_write(const char *path, const char *text)
+{
+    FILE *file = fopen(path, "wb");
+    size_t length = strlen(text);
+    int ok;
 
+    if (!file) return 0;
+    ok = fwrite(text, 1, length, file) == length;
+    fclose(file);
+    return ok;
+}
 
+static int libregpu_ui_test_update_profile(void *userdata, uint32_t profile_id,
+                                        const LibreGPULauncherSettings *settings,
+                                        LibreGPUUIProfile *out_profile,
+                                        char *error_text, size_t error_capacity)
+{
+    LibreGPUProfileStore *store = (LibreGPUProfileStore *)userdata;
+    LibreGPUStoredProfile stored;
 
+    if (!store || !settings || !out_profile) return 0;
+    memset(&stored, 0, sizeof(stored));
+    if (!libregpu_profiles_update(store, profile_id, settings->game_path,
+                               (int)(settings->config.target_loops_per_second + 0.5),
+                               &stored, error_text, error_capacity))
+        return 0;
+
+    memset(out_profile, 0, sizeof(*out_profile));
+    out_profile->id = stored.id;
+    out_profile->config = settings->config;
+    out_profile->config.target_loops_per_second = (double)stored.fps;
+    (void)snprintf(out_profile->game_path, sizeof(out_profile->game_path),
+                   "%s", stored.path);
+    (void)snprintf(out_profile->name, sizeof(out_profile->name),
+                   "%s", stored.name);
+    return 1;
+}
+
+typedef struct {
+    int  minimized;
+    int  restored;
+    int  launches;
+    int  runnable;
+    int  fail;
+    char last_path[LIBREGPU_UI_PATH_MAX];
+} LibreGPUUITestLaunch;
+
+static int ui_test_launch_runnable(void *userdata, const char *path)
+{
+    LibreGPUUITestLaunch *trace = (LibreGPUUITestLaunch *)userdata;
+    (void)path;
+    return trace->runnable;
+}
+
+static void ui_test_launch_minimize(void *userdata)
+{
+    LibreGPUUITestLaunch *trace = (LibreGPUUITestLaunch *)userdata;
+    trace->minimized++;
+}
+
+static void ui_test_launch_restore(void *userdata)
+{
+    LibreGPUUITestLaunch *trace = (LibreGPUUITestLaunch *)userdata;
+    trace->restored++;
+}
+
+static int ui_test_launch_start(void *userdata, const char *path,
+                                char *error_text, size_t error_capacity)
+{
+    LibreGPUUITestLaunch *trace = (LibreGPUUITestLaunch *)userdata;
+
+    trace->launches++;
+    (void)snprintf(trace->last_path, sizeof(trace->last_path), "%s",
+                   path ? path : "");
+    if (trace->fail) {
+        if (error_text && error_capacity)
+            (void)snprintf(error_text, error_capacity, "%s",
+                           "test launch failure");
+        return 0;
+    }
+    return 1;
+}
+
+static int libregpu_ui_selftest(FILE *out)
+{
+    char directory[] = "/tmp/libregpu-selftest-XXXXXX";
+    char profile_file[LIBREGPU_PROFILE_PATH_MAX];
+    LibreGPUProfileStore store;
+    LibreGPUProfileStore reloaded;
+    LibreGPUStoredProfile created;
+    LibreGPUStoredProfile updated;
+    LibreGPUUI ui;
+    LibreGPULauncherSettings settings;
+    LibreGPUUIHooks hooks;
+    LibreGPUUIProfile seed;
+    struct nk_image seed_thumbnail;
+    const char *first_path = "/tmp/graf x/a\\b\"c\t.d/run game.exe";
+    const char *second_path = "/tmp/graf x/run game2.exe";
+    const char *third_path = "/tmp/graf x/run game3.exe";
+    int failures = 0;
+    int checks = 0;
+    uint32_t first_id = 0;
+    uint32_t second_id = 0;
+
+#define UI_CHECK(condition, message)                                           \
+    do {                                                                       \
+        ++checks;                                                              \
+        if (!(condition)) {                                                    \
+            ++failures;                                                        \
+            fprintf(out, "  FAIL: %s\n", message);                             \
+        }                                                                      \
+    } while (0)
+
+    if (!mkdtemp(directory)) {
+        fprintf(out, "libregpu self-test: cannot create a temporary directory\n");
+        return 1;
+    }
+    (void)snprintf(profile_file, sizeof(profile_file), "%s/profiles.txt",
+                   directory);
+
+    fprintf(out, "libregpu %s (%s, %s) profile-store and artwork self-test\n\n",
+            LIBREGPU_VERSION, LIBREGPU_STEP_LABEL, LIBREGPU_RELEASE);
+
+    UI_CHECK(libregpu_profiles_init(&store, directory) == 1,
+             "a fresh store initializes");
+    UI_CHECK(libregpu_profiles_count(&store) == 0, "a fresh store is empty");
+    UI_CHECK(!libregpu_profiles_init(NULL, directory), "NULL store is rejected");
+    UI_CHECK(!libregpu_profiles_init(&store, ""), "empty directory is rejected");
+
+    memset(&created, 0, sizeof(created));
+    UI_CHECK(libregpu_profiles_add(&store, first_path, 60, &created, NULL, 0) == 1,
+             "a profile with escaped characters is added");
+    UI_CHECK(libregpu_profiles_count(&store) == 1, "one profile is stored");
+    UI_CHECK(created.id != 0, "the stored profile has a stable ID");
+    first_id = created.id;
+
+    UI_CHECK(!libregpu_profiles_add(&store, "", 60, NULL, NULL, 0),
+             "an empty path is rejected");
+    UI_CHECK(!libregpu_profiles_add(&store, "/tmp/x", -1, NULL, NULL, 0),
+             "a negative FPS is rejected");
+
+    memset(&updated, 0, sizeof(updated));
+    UI_CHECK(libregpu_profiles_update(&store, first_id, second_path, 30,
+                                   &updated, NULL, 0) == 1,
+             "an existing profile is updated");
+    UI_CHECK(updated.id == first_id, "an update keeps the profile ID");
+    UI_CHECK(libregpu_profiles_count(&store) == 1,
+             "an update does not create a duplicate");
+    UI_CHECK(strcmp(updated.path, second_path) == 0,
+             "an update stores the new path");
+    UI_CHECK(updated.fps == 30, "an update stores the new FPS");
+    UI_CHECK(strcmp(updated.name, "run game2.exe") == 0,
+             "an update refreshes the display name");
+
+    UI_CHECK(!libregpu_profiles_update(&store, 999999u, third_path, 30,
+                                    NULL, NULL, 0),
+             "updating a missing profile fails cleanly");
+
+    UI_CHECK(libregpu_profiles_init(&reloaded, directory) == 1,
+             "the store reloads from disk");
+    UI_CHECK(libregpu_profiles_count(&reloaded) == 1,
+             "the update survives a reload");
+    {
+        const LibreGPUStoredProfile *restored = libregpu_profiles_at(&reloaded, 0);
+        UI_CHECK(restored != NULL, "the reloaded profile is readable");
+        if (restored) {
+            UI_CHECK(restored->id == first_id, "the reloaded ID is stable");
+            UI_CHECK(restored->fps == 30, "the reloaded FPS is correct");
+            UI_CHECK(strcmp(restored->path, second_path) == 0,
+                     "the reloaded path keeps its exact characters");
+            UI_CHECK(strcmp(restored->name, "run game2.exe") == 0,
+                     "the reloaded name is correct");
+        }
+    }
+    UI_CHECK(libregpu_path_is_file(profile_file) == 1,
+             "the profile file was written to the expected location");
+
+    memset(&created, 0, sizeof(created));
+    UI_CHECK(libregpu_profiles_add(&store, third_path, 120, &created, NULL, 0) == 1,
+             "a second profile is added");
+    second_id = created.id;
+    UI_CHECK(libregpu_profiles_count(&store) == 2, "two profiles are stored");
+    UI_CHECK(libregpu_profiles_delete(&store, second_id) == 1,
+             "the second profile is deleted");
+    UI_CHECK(libregpu_profiles_count(&store) == 1,
+             "deletion removes exactly one profile");
+    UI_CHECK(!libregpu_profiles_delete(&store, second_id),
+             "deleting a missing profile fails cleanly");
+
+    UI_CHECK(libregpu_profiles_init(&reloaded, directory) == 1,
+             "the store reloads after deletion");
+    UI_CHECK(libregpu_profiles_count(&reloaded) == 1,
+             "the remaining profile survives the reload");
+    {
+        const LibreGPUStoredProfile *restored = libregpu_profiles_at(&reloaded, 0);
+        UI_CHECK(restored && restored->id == first_id,
+                 "the surviving profile is the edited one");
+    }
+
+    memset(&ui, 0, sizeof(ui));
+    memset(&settings, 0, sizeof(settings));
+    memset(&hooks, 0, sizeof(hooks));
+    memset(&seed, 0, sizeof(seed));
+    memset(&seed_thumbnail, 0, sizeof(seed_thumbnail));
+    libregpu_config_defaults(&settings.config);
+
+    hooks.userdata = &store;
+    hooks.update_profile = libregpu_ui_test_update_profile;
+    libregpu_ui_init(&ui, &settings, &hooks, seed_thumbnail, 0);
+
+    seed.id = first_id;
+    seed.config = settings.config;
+    seed.config.target_loops_per_second = 30.0;
+    (void)snprintf(seed.game_path, sizeof(seed.game_path), "%s", first_path);
+    (void)snprintf(seed.name, sizeof(seed.name), "%s", "run game.exe");
+    seed.thumbnail.handle.ptr = (void *)(uintptr_t)0x1u;
+    seed.thumbnail.w = 32;
+    seed.thumbnail.h = 32;
+    seed.has_thumbnail = 1;
+    libregpu_ui_set_profiles(&ui, &seed, 1);
+
+    UI_CHECK(ui.profile_count == 1, "the launcher accepts one profile");
+    libregpu_open_config_edit(&ui, first_id);
+    UI_CHECK(ui.config_open && ui.editing_profile_id == first_id,
+             "right-click Edit opens the dialog for that profile");
+    UI_CHECK(strcmp(ui.path_text, first_path) == 0,
+             "Edit prefills the stored path");
+    UI_CHECK(strcmp(ui.fps_text, "30") == 0, "Edit prefills the stored FPS");
+
+    (void)snprintf(ui.path_text, sizeof(ui.path_text), "%s", profile_file);
+    (void)snprintf(ui.fps_text, sizeof(ui.fps_text), "%s", "abc");
+    libregpu_save_profile_from_config(&ui);
+    UI_CHECK(ui.config_open && ui.fps_invalid,
+             "an invalid edit stays open and reports the FPS");
+
+    (void)snprintf(ui.fps_text, sizeof(ui.fps_text), "%s", "45");
+    libregpu_save_profile_from_config(&ui);
+    UI_CHECK(!ui.config_open && ui.editing_profile_id == 0,
+             "a valid edit closes the dialog");
+    UI_CHECK(ui.profile_count == 1, "editing does not create a profile");
+    UI_CHECK(ui.profiles[0].id == first_id, "editing keeps the profile ID");
+    UI_CHECK(strcmp(ui.profiles[0].game_path, profile_file) == 0,
+             "editing updates the profile path");
+    UI_CHECK(ui.profiles[0].config.target_loops_per_second == 45.0,
+             "editing updates the profile FPS");
+    UI_CHECK(ui.profiles[0].has_thumbnail &&
+                 ui.profiles[0].thumbnail.handle.ptr == (void *)(uintptr_t)0x1u,
+             "editing keeps the renderer-owned thumbnail");
+
+    UI_CHECK(libregpu_profiles_init(&reloaded, directory) == 1,
+             "the store reloads after a launcher edit");
+    {
+        const LibreGPUStoredProfile *restored = libregpu_profiles_at(&reloaded, 0);
+        UI_CHECK(restored && restored->id == first_id && restored->fps == 45,
+                 "the launcher edit reaches the profile file");
+        UI_CHECK(restored && strcmp(restored->path, profile_file) == 0,
+                 "the edited path reaches the profile file");
+    }
+
+    {
+        static const char triangle_svg[] =
+            "<svg viewBox=\"0 0 10 10\"><path fill=\"#ff0000\" "
+            "d=\"M0 0 L10 0 L5 10 Z\"/></svg>";
+        static const char rings_svg[] =
+            "<svg viewBox=\"0 0 10 10\"><path fill=\"#00ff00\" "
+            "fill-rule=\"evenodd\" "
+            "d=\"M0 0 H10 V10 H0 Z M3 3 H7 V7 H3 Z\"/></svg>";
+        static const char plate_svg[] =
+            "<svg viewBox=\"0 0 10 10\">"
+            "<path fill=\"#000000\" d=\"M0 0 H10 V10 H0 Z\"/>"
+            "<path fill=\"#ffffff\" d=\"M4 4 H6 V6 H4 Z\"/></svg>";
+        static const char transform_svg[] =
+            "<svg viewBox=\"0 0 10 10\"><path fill=\"#ff0000\" "
+            "transform=\"translate(2 2)\" d=\"M0 0 H4 V4 H0 Z\"/></svg>";
+        char asset[LIBREGPU_UI_PATH_MAX];
+        char game[LIBREGPU_UI_PATH_MAX];
+        char icon[LIBREGPU_UI_PATH_MAX];
+        LibreGPUImage image;
+
+        memset(&image, 0, sizeof(image));
+        UI_CHECK(libregpu_image_parse_svg(triangle_svg,
+                                       sizeof(triangle_svg) - 1,
+                                       10, 10, 0, &image) == LIBREGPU_OK,
+                 "the SVG loader accepts a closed triangle");
+        UI_CHECK(image.rgba && image.rgba[(5 * 10 + 5) * 4 + 3] == 255,
+                 "the triangle interior is opaque");
+        UI_CHECK(image.rgba && image.rgba[(9 * 10 + 0) * 4 + 3] == 0,
+                 "the area outside the triangle is transparent");
+        libregpu_image_free(&image);
+
+        memset(&image, 0, sizeof(image));
+        UI_CHECK(libregpu_image_parse_svg(rings_svg, sizeof(rings_svg) - 1,
+                                       10, 10, 0, &image) == LIBREGPU_OK,
+                 "the SVG loader honours the even-odd fill rule");
+        UI_CHECK(image.rgba && image.rgba[(5 * 10 + 5) * 4 + 3] == 0,
+                 "an even-odd hole stays transparent");
+        UI_CHECK(image.rgba && image.rgba[(5 * 10 + 1) * 4 + 3] == 255,
+                 "the even-odd ring is filled");
+        libregpu_image_free(&image);
+
+        memset(&image, 0, sizeof(image));
+        UI_CHECK(libregpu_image_parse_svg(plate_svg, sizeof(plate_svg) - 1,
+                                       10, 10,
+                                       LIBREGPU_IMAGE_SKIP_BLACK_PLATE,
+                                       &image) == LIBREGPU_OK,
+                 "the SVG loader accepts a background plate");
+        UI_CHECK(image.rgba && image.rgba[(0 * 10 + 0) * 4 + 3] == 0,
+                 "the full-canvas black plate is skipped");
+        UI_CHECK(image.rgba && image.rgba[(5 * 10 + 5) * 4 + 3] == 255,
+                 "artwork above the plate is kept");
+        libregpu_image_free(&image);
+
+        UI_CHECK(libregpu_image_parse_svg("<p>no svg</p>", 13, 10, 10, 0,
+                                       &image) != LIBREGPU_OK,
+                 "malformed input is rejected");
+
+        memset(&image, 0, sizeof(image));
+        UI_CHECK(libregpu_image_parse_svg(transform_svg,
+                                       sizeof(transform_svg) - 1,
+                                       10, 10, 0, &image) == LIBREGPU_OK &&
+                     image.rgba && image.rgba[(1 * 10 + 1) * 4 + 3] == 0,
+                 "a transformed path is skipped, not misplaced");
+        libregpu_image_free(&image);
+
+        (void)snprintf(asset, sizeof(asset), "%s/logo.svg", directory);
+        UI_CHECK(libregpu_ui_test_write(asset, triangle_svg),
+                 "the test writes an SVG asset");
+        (void)setenv("LIBREGPU_ASSETS", directory, 1);
+        UI_CHECK(libregpu_asset_find("logo.svg", icon, sizeof(icon)) == 1 &&
+                     strcmp(icon, asset) == 0,
+                 "the asset search honours LIBREGPU_ASSETS");
+        UI_CHECK(libregpu_image_load_svg(icon, 32, 32, 0, &image) == LIBREGPU_OK &&
+                     image.width == 32 && image.height == 32,
+                 "the asset loads from its discovered path");
+        libregpu_image_free(&image);
+        (void)unsetenv("LIBREGPU_ASSETS");
+
+        libregpu_asset_set_base(directory);
+        UI_CHECK(libregpu_asset_find("logo.svg", icon, sizeof(icon)) == 1 &&
+                     strcmp(icon, asset) == 0,
+                 "the asset search honours the executable directory");
+        libregpu_asset_set_base(NULL);
+
+        (void)snprintf(game, sizeof(game), "%s/run game.exe", directory);
+        (void)snprintf(icon, sizeof(icon), "%s/run game.svg", directory);
+        UI_CHECK(libregpu_ui_test_write(icon, triangle_svg),
+                 "the test writes a game icon");
+        UI_CHECK(libregpu_game_icon_find(game, asset, sizeof(asset)) == 1 &&
+                     strcmp(asset, icon) == 0,
+                 "a game icon is discovered beside the executable");
+    }
+
+    (void)remove(profile_file);
+    (void)rmdir(directory);
+
+    {
+        LibreGPULaunchHost host;
+        LibreGPUUITestLaunch trace;
+        char message[200];
+
+        memset(&trace, 0, sizeof(trace));
+        trace.runnable = 1;
+        host.userdata = &trace;
+        host.is_runnable = ui_test_launch_runnable;
+        host.minimize = ui_test_launch_minimize;
+        host.restore = ui_test_launch_restore;
+        host.launch = ui_test_launch_start;
+
+        message[0] = 'x';
+        UI_CHECK(ui_launch_game(&host, "/tmp/game", message,
+                                sizeof(message)) == 1 &&
+                     trace.minimized == 1 && trace.restored == 0 &&
+                     trace.launches == 1 &&
+                     strcmp(trace.last_path, "/tmp/game") == 0 &&
+                     message[0] == '\0',
+                 "a launched game minimizes the window once");
+
+        memset(&trace, 0, sizeof(trace));
+        trace.runnable = 1;
+        trace.fail = 1;
+        UI_CHECK(ui_launch_game(&host, "/tmp/game", message,
+                                sizeof(message)) == 0 &&
+                     trace.minimized == 1 && trace.restored == 1 &&
+                     strcmp(message, "test launch failure") == 0,
+                 "a failed launch restores the window and reports the reason");
+
+        memset(&trace, 0, sizeof(trace));
+        trace.runnable = 0;
+        UI_CHECK(ui_launch_game(&host, "/tmp/missing", message,
+                                sizeof(message)) == 0 &&
+                     trace.minimized == 0 && trace.restored == 0 &&
+                     trace.launches == 0 &&
+                     strcmp(message, "File not found or not executable") == 0,
+                 "a missing executable is rejected before minimizing");
+
+        memset(&trace, 0, sizeof(trace));
+        trace.runnable = 1;
+        UI_CHECK(ui_launch_game(&host, "", message, sizeof(message)) == 0 &&
+                     trace.minimized == 0 && trace.launches == 0,
+                 "an empty path is rejected before minimizing");
+
+        UI_CHECK(ui_launch_game(NULL, "/tmp/game", message,
+                                sizeof(message)) == 0,
+                 "a missing host is rejected");
+    }
+
+    UI_CHECK(libregpu_ui_icon_ok(&libregpu_ui_icon_logo),
+             "the logo artwork decodes with opaque and transparent areas");
+    UI_CHECK(libregpu_ui_icon_ok(&libregpu_ui_icon_add),
+             "the add artwork decodes with opaque and transparent areas");
+    UI_CHECK(libregpu_ui_icon_ok(&libregpu_ui_icon_close),
+             "the close artwork decodes with opaque and transparent areas");
+    UI_CHECK(libregpu_ui_icon_ok(&libregpu_ui_icon_warning),
+             "the title mark decodes with opaque and transparent areas");
+
+    fprintf(out, "%d checks, %d failed\n", checks, failures);
+#undef UI_CHECK
+    return failures == 0 ? 0 : 1;
+}
+#else
+static int libregpu_ui_selftest(FILE *out)
+{
+    fprintf(out, "libregpu self-test: profile-store test is POSIX-only\n");
+    return 0;
+}
+#endif
 
 static void print_usage(FILE *out, const char *program)
 {
     fprintf(out,
-            "usage: %s [--help | --version]\n"
+            "usage: %s [--help | --version | --selftest]\n"
             "\n"
-            "%s %s (%s) graphical launcher\n"
+            "LibreGPU graphical launcher %s\n"
+            "\n"
+            "--selftest writes and reloads a temporary profile store and\n"
+            "decodes the embedded artwork without opening a window; it needs\n"
+            "no display.\n"
             "\n"
             "Controls\n"
             "  logo click          cycle profile pages\n"
             "  +                   add a profile\n"
             "  left-click profile  launch the game\n"
-            "  right-click profile delete the profile\n"
+            "  right-click profile edit or delete the profile\n"
+            "  i                   compatibility and diagnostics\n"
             "  X                   quit\n"
-            "  Esc                 quit\n"
+            "  Esc                 close the open panel, then quit\n"
             "  top strip / Alt+drag move the window\n"
             "  window edges        resize the window\n"
             "  drop a file         fill the config path field\n",
-            program ? program : "libregpu", LIBREGPU_CODE_NAME, LIBREGPU_VERSION, LIBREGPU_STEP_LABEL);
+            program ? program : "libregpu", LIBREGPU_VERSION);
 }
 
-int libregpu_gui_main(int argc, char **argv)
+int main(int argc, char **argv)
 {
     int i;
 
@@ -3700,8 +4661,12 @@ int libregpu_gui_main(int argc, char **argv)
             return 0;
         }
         if (strcmp(arg, "--version") == 0) {
-            printf("%s %s (%s)\n", LIBREGPU_CODE_NAME, LIBREGPU_VERSION, LIBREGPU_STEP_LABEL);
+            printf("libregpu %s (%s, %s)\n",
+                   LIBREGPU_VERSION, LIBREGPU_STEP_LABEL, LIBREGPU_RELEASE);
             return 0;
+        }
+        if (strcmp(arg, "--selftest") == 0) {
+            return libregpu_ui_selftest(stdout);
         }
 
         fprintf(stderr, "libregpu: unknown option '%s'\n", arg);
